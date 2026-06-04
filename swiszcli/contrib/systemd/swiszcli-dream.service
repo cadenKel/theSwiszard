@@ -1,0 +1,10 @@
+[Unit]
+Description=swiszCLI dream cycle (nightly chunk promotion + prune + deprecate)
+Wants=swiszmem.service
+After=swiszmem.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/swiszcli-dream
+Nice=10
+IOSchedulingClass=idle

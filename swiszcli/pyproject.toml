@@ -1,0 +1,28 @@
+[project]
+name = "swiszcli"
+version = "0.1.0"
+description = "Local-first agent CLI where the Swiszard is the agent and the LLM is a pluggable component."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Sean" }]
+dependencies = [
+    "httpx >= 0.27",
+    "prompt_toolkit >= 3.0",
+]
+
+[project.scripts]
+swisz = "swiszcli.cli:main"
+swiszcli = "swiszcli.cli:main"
+swiszcli-dream = "swiszcli.dream_cli:main"
+swiszcli-status = "swiszcli.status_cli:main"
+swiszcli-propose = "swiszcli.propose_cli:main"
+swiszcli-federate = "swiszcli.federation_cli:main"
+swiszcli-swisz-log = "swiszcli.swisz_log_cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["swiszcli*"]
