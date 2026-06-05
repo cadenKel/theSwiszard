@@ -75,6 +75,7 @@ from .embed import embed as _embed, EmbedError as _EmbedError
 from .task_fingerprint import TaskFingerprint as _TaskFingerprint
 from .task_fingerprint import blend as _fp_blend
 from .speculative import SpeculativeCache as _SpecCache
+from .stats import incr as _stats_incr
 
 
 DIM = "\x1b[2m"
@@ -888,6 +889,11 @@ def handle_slash(line: str, *, cfg: Config, mem: MemoryClient, state: AgentState
             print(c(f"  {r['id']}  {r['wizard']:30s}  {r['source']:5s}  {r['status']:9s}  {dt:.2f}s  parent={r['parent_id'] or '-'}", DIM))
         return True
 
+    if cmd == "stats":
+        from .stats import report as _stats_report
+        print(_stats_report())
+        return True
+
     if cmd == "replay":
         if not args:
             print(c("  usage: /replay <trace_id>", RED))
@@ -1095,6 +1101,8 @@ def main():
             _success = not (result.startswith("ERROR") or result.startswith("BLOCKED"))
             _outcome = _p0_learner.observe(_user_text, task, success=_success)
             _act = _outcome["action"]
+            if _act == "learn": _stats_incr("examples_learned")
+            elif _act == "reinforce": _stats_incr("examples_reinforced")
             if _act == "learn":
                 _w = _outcome["wizard"]
                 _id = _outcome["id"]
@@ -1150,6 +1158,7 @@ def main():
 
     _orig_recall_fn = recall_fn
     def recall_fn(query):
+        _stats_incr("turns")
         # flush any sequence accumulated during the previous turn BEFORE updating user_text
         try:
             if getattr(state, "_flush_sequence", None):
@@ -1394,10 +1403,10 @@ def main():
                         for st in steps[:2]:  # first two safe steps
                             t = (st.get("task") or "").strip()
                             if t and _spec_safe(t):
-                                state._spec.prime(t, swiszard_do)
+                                state._spec.prime(t, swiszard_do); _stats_incr("spec_attempts")
                     except Exception:
                         pass
-                    hint = _render_seq_hint(matches)
+                    hint = _render_seq_hint(matches); _stats_incr("sequence_hits")
                     if base:
                         return base + chr(10) + chr(10) + hint
                     return hint
@@ -1418,7 +1427,7 @@ def main():
                     pass
             if len(calls) >= 2 and ut:
                 vec = _embed(ut)
-                _seq_store.record(ut, vec, calls, source="observed")
+                _seq_store.record(ut, vec, calls, source="observed"); _stats_incr("sequences_learned")
             state._turn_calls = []
             state._last_seq_user_text = ut
         except Exception:
@@ -1434,7 +1443,7 @@ def main():
         except Exception:
             hit = None
         if hit is not None:
-            state._spec_hits += 1
+            state._spec_hits += 1; _stats_incr("spec_hits")
             print(c(f"  spec\u25b8 cache hit ({len(hit)} chars)", DIM))
             # still need to flow through on_tool_end side-effects (sequence + fingerprint)
             try:
@@ -1445,7 +1454,7 @@ def main():
             except Exception:
                 pass
             return hit
-        state._spec_misses += 1
+        state._spec_misses += 1; _stats_incr("spec_misses")
         return _swd_before_spec(task)
 
     # ---- P1.5 gap detector + research wizard ------------------------------
@@ -1471,7 +1480,7 @@ def main():
                 for ph in phrases:
                     verdict = _void_detector.detect(ph, embed_fn=_e2, corpus_provider=lambda c=corpus: c)
                     if verdict.has_void:
-                        void_queries.append(ph)
+                        void_queries.append(ph); _stats_incr("voids_detected")
                 if void_queries:
                     print(c(f"  void▸ {len(void_queries)} low-density claim(s); fetching", YELLOW))
         except Exception as e:
@@ -1481,7 +1490,7 @@ def main():
         all_queries = list(dict.fromkeys(gap_queries + void_queries))[:4]
         if not all_queries:
             return None
-        print(c(f"  research▸ firing {len(all_queries)} quer(y/ies)", YELLOW))
+        print(c(f"  research▸ firing {len(all_queries)} quer(y/ies)", YELLOW)); _stats_incr("voids_filled")
         try:
             # Build context recall fn for the research wizard
             def _ctx_recall(q):
