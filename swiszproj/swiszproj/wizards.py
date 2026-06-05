@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from .swiszproj import ProjectClient
-from .wizard import Choice, Step, Wizard, register
+from .client import ProjectClient
+from swiszcli.wizard import Choice, Step, Wizard, register
 
 
 # Active project name, set by proj.use. None = ask every time.

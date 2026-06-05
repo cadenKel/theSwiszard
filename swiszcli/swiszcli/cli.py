@@ -45,12 +45,12 @@ from .memory import MemoryClient
 from .prompt import build_memory_block, build_code_context_block, build_system_prompt, build_system_prompt_full
 from .swiszard_bridge import SwiszardUnavailable, load_swiszard_do
 from .mem_dispatch import try_memory_dispatch, strip_xml_wrapper
-from .proj_dispatch import try_project_dispatch
+from swiszproj.dispatch import try_project_dispatch
 from .wizard import Cancelled, list_wizards, resolve
 from .wizard_ptk import PTKRunner
 from . import wizards_mem, pools, trace as tracelog, archive as toolarchive, wizard_store, wizards_meta, sessions as sessionlog, ctx_budget, swisz_log as swiszcalls
-from . import wizards_proj
-from .swiszproj import ProjectClient
+from swiszproj import wizards as wizards_proj
+from swiszproj.client import ProjectClient
 from .warm import preload, unload, is_resident, Spinner
 
 # P0: swiszContext + router hint wiring (2026-06-01)
@@ -63,7 +63,7 @@ from .scratchpad import ScratchpadStore as _SPStore
 from .scratchpad_wizards import ScratchpadOps as _SPOps, parse_and_dispatch as _sp_dispatch
 from .tool_synthesis import ToolSynthesizer as _ToolSynth, extract_shell as _extract_shell, capture_shell_fallback as _capture_fallback
 from .sequence_learn import SequenceStore as _SeqStore, render_sequence_hint as _render_seq_hint
-from .project_state import ProjectStore as _ProjStore, detect_project as _detect_proj
+from swiszproj.state import ProjectStore as _ProjStore, detect_project as _detect_proj
 from .edit_engine import EditEngine as _EditEngine
 from .ast_index import ASTIndex as _ASTIndex
 from .edit_wizards import EditOps as _EditOps, dispatch as _edit_dispatch, _dsl_match as _edit_dsl_match
