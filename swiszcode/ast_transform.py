@@ -348,6 +348,8 @@ _RE_RENAME = re.compile(r'^ast\s+rename\s+(\S+)\s+to\s+(\S+)\s+in\s+(\S+)\s*$')
 _RE_DELETE = re.compile(r'^ast\s+delete\s+(\S+)\s+in\s+(\S+)\s*$')
 _RE_INSERT = re.compile(
     r'^ast\s+insert\s+(\S+)\s+after\s+(\S+)\s+in\s+(\S+)\s*$')
+_RE_LINT = re.compile(r'^ast\s+lint\s+(\S+)\s*$')
+_RE_FIX = re.compile(r'^ast\s+fix\s+(\S+)\s*$')
 
 
 def dispatch(task: str) -> str:
@@ -429,6 +431,32 @@ def dispatch(task: str) -> str:
         except Exception as e:
             return f"ast insert: {e}"
 
+    # ast lint
+    m = _RE_LINT.match(task)
+    if m:
+        try:
+            from swiszcode.ast_lint import lint
+            r = lint(m.group(1))
+            if "error" in r:
+                return "ast lint: " + r["error"]
+            return _json.dumps(r, separators=(",", ":"))
+        except Exception as e:
+            return f"ast lint: {e}"
+
+    # ast fix
+    m = _RE_FIX.match(task)
+    if m:
+        try:
+            from swiszcode.ast_lint import fix
+            r = fix(m.group(1))
+            if "error" in r:
+                return "ast fix: " + r["error"]
+            if not r["changed"]:
+                return f"ast fix: {m.group(1)} already clean (no changes)"
+            return f"ast fix: sorted imports in {m.group(1)}\n{r['diff']}"
+        except Exception as e:
+            return f"ast fix: {e}"
+
     return (
         "ast_transform: unrecognized operation. Forms:\n"
         "  ast find FUNC in FILE\n"
@@ -437,5 +465,7 @@ def dispatch(task: str) -> str:
         "  ast rename OLD to NEW in FILE\n"
         "  ast delete NAME in FILE\n"
         "  ast insert B64 after NAME in FILE\n"
+        "  ast lint FILE\n"
+        "  ast fix FILE\n"
         "  ast format FILE"
     )
