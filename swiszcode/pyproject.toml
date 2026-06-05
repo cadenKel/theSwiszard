@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "swiszcode"
+version = "0.1.0"
+description = "Deterministic Python AST extraction, indexing, transformation, and 3D visualization"
+requires-python = ">=3.11"
+dependencies = [
+    "libcst>=1.0.0",
+]
+
+[project.scripts]
+swiszcode = "server:main"
+
+[tool.setuptools.packages.find]
+include = ["*.py"]

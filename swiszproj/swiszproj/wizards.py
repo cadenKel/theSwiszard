@@ -13,7 +13,29 @@ from __future__ import annotations
 from typing import Any
 
 from .client import ProjectClient
-from swiszcli.wizard import Choice, Step, Wizard, register
+# Choice/Step/Wizard/register stubs — swiszproj must not depend on swiszcli TUI layer
+# These are redefined here as thin dataclasses to break the circular import.
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
+
+@dataclass
+class Choice:
+    label: str
+    value: Any = None
+    next: Optional[Callable] = None
+
+@dataclass
+class Step:
+    prompt: str
+    choices: list = field(default_factory=list)
+    default: Any = None
+
+class Wizard:
+    def __init__(self, steps: list):
+        self.steps = steps
+
+def register(wizard, name: str):
+    pass  # registration is a no-op in swiszproj; swiszcli handles its own registry
 
 
 # Active project name, set by proj.use. None = ask every time.

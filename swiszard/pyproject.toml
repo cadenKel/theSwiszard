@@ -4,8 +4,6 @@ version = "0.1.0"
 description = "Deterministic router and memory server"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp",
-    "fastmcp",
     "libcst",
     "black"
 ]
