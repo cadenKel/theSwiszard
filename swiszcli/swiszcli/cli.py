@@ -1423,6 +1423,14 @@ def main():
                     uvec = _embed(ut)
                     state._traj.add(uvec)
                     state._traj_predicted = state._traj.predict_next()
+                    # P1.9+P1.16: feed trajectory prediction into speculative cache
+                    if state._traj_predicted is not None and not state._traj.is_settled():
+                        seq_matches = _seq_store.find(state._traj_predicted, top_k=2, min_score=0.65)
+                        for match in seq_matches:
+                            for step in (match.steps or [])[:2]:
+                                task = step.get('task', '') if isinstance(step, dict) else ''
+                                if task and _spec_safe(task):
+                                    state._spec.prime(task, swiszard_do)
                 except Exception:
                     pass
             if len(calls) >= 2 and ut:
