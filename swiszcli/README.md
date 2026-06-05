@@ -35,7 +35,7 @@ swz (entrypoint) → swiszcli/cli.py
 
 ```bash
 # Set env
-export SWISZCLI_SWISZARD_PATH=/path/to/swiszard
+export SWISZCLI_SWISZARD_PATH=/home/ziggibot/theSwiszard/swiszard
 # Start swiszmem
 systemctl --user start swiszmem.service
 # Pull model

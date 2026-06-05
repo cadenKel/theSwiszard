@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>swiszcode</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0a0a1a;overflow:hidden;font-family:"Fira Code","Courier New",monospace}
+  canvas{display:block}
+  #info{position:fixed;bottom:0;left:0;right:0;padding:10px 16px;background:rgba(10,10,30,0.92);color:#ccc;font-size:12px;border-top:1px solid rgba(255,255,255,0.08);display:flex;gap:20px;align-items:center}
+  #info strong{color:#fff}
+  #panel{position:fixed;top:16px;right:16px;width:440px;max-height:65vh;background:rgba(10,10,30,0.95);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:16px;color:#ccc;font-size:12px;overflow-y:auto;display:none;font-family:"Fira Code","Courier New",monospace}
+  #panel h3{margin:0 0 4px;font-size:14px}
+  .role{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;margin-bottom:8px}
+  .funcs{color:#FF8888;font-size:11px}
+  .classes{color:#FFAA22;font-size:11px}
+  .imports{color:#88CC88;font-size:11px}
+  #help{position:fixed;bottom:56px;left:16px;color:#888;font-size:11px;background:rgba(10,10,30,0.7);padding:6px 10px;border-radius:4px}
+  .label{color:#fff;font-size:10px;pointer-events:none;text-shadow:0 0 4px rgba(0,0,0,0.8);text-align:center}
+</style>
+</head>
+<body>
+<div id="help">drag: orbit | scroll: zoom | right-drag: pan | click: info | R:	reset F:	front T:	top | Esc: close</div>
+<div id="info"><span>file: <strong id="fname">&mdash;</strong></span><span>nodes: <strong id="ncount">0</strong></span><span>edges: <strong id="ecount">0</strong></span><span>sel: <strong id="sname">&mdash;</strong></span></div>
+<div id="panel"><h3></h3><span class="role"></span><div class="funcs"></div><div class="classes"></div><div class="imports"></div></div>
+
+<script type="importmap">
+  {"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.174.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@@0.174.0/examples/jsm/"}}
+</script>
+
+<script type="module">
+import * as THREE from "three";
+import {OrbitControls} from "three/addons/controls/OrbitControls.js";
+import {CSS2DRenderer, CSS2DObject} from "three/addons/renderers/CSS2DRenderer.js";
+
+const params = new URLSearchParams(location.search);
+const file = params.get("file");
+const isFile = !!file;
+const url = isFile ? "/view?file=" + encodeURIComponent(file) : "/repo";
+
+const resp = await fetch(url);
+const data = await resp.json();
+
+const nodes = isFile ? data.nodes : data.modules;
+const edgesData = isFile ? data.edges : [];
+
+document.getElementById("fname").textContent = isFile ? file.split("/").pop() : data.root || "-";
+document.getElementById("ncount").textContent = nodes.length;
+
+let edgeCount = isFile ? (edgeData ? edgeData.length : 0) : 0;
+if (!isFile) {
+  for (const m of nodes) edgeCount += (m.import_targets || []).length;
+}
+document.getElementById("ecount").textContent = edgeCount;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color("#0a0a1a");
+scene.fog = new THREE.Fog("#0a0a1a",30,80);
+
+const cam = new THREE.PerspectiveCamera(50,innerWidth/innerHeight,0.3,200);
+cam.position.set(12,8,16);
+
+const rend = new THREE.WebGLRenderer({antialias:true});
+rend.setSize(innerWidth,innerHeight);
+rend.setPixelRatio(Math.min(devicePixelRatio,2));
+document.body.appendChild(rend.domElement);
+
+const lr = new CSS2DRenderer();
+lr.setSize(innerWidth,innerHeight);
+lr.domElement.style.position = "fixed";
+lr.domElement.style.top = "0";
+lr.domElement.style.pointerEvents = "none";
+document.body.appendChild(lr.domElement);
+
+const ctrl = new OrbitControls(cam,rend.domElement);
+ctrl.enableDamping=true;ctrl.dampingFactor=0.08;
+ctrl.target.set(0,0,0);ctrl.update();
+
+scene.add(new THREE.AmbientLight("#334466",2.5));
+const s1 = new THREE.SpotLight("#ffffff",8,60,0.5);s1.position.set(15,20,15);scene.add(s1);
+const s2 = new THREE.SpotLight("#6688cc",4,50,0.5);s2.position.set(-15,-5,-10);scene.add(s2);
+
+const ng = new THREE.Group();scene.add(ng);
+const eg = new THREE.Group();scene.add(eg);
+
+// Platonic solids
+const geos = {
+  tetra: new THREE.TetrahedronGeometry(0.55),
+  cube: new THREE.BoxGeometry(0.8,0.8,0.8),
+  octa: new THREE.OctahedronGeometry(0.5),
+  dodeca: new THREE.DodecahedronGeometry(0.5),
+  icosa: new THREE.IcosahedronGeometry(0.5),
+};
+const shapes = ["tetra","cube","octa","dodeca","icosa"];
+
+const nodemap = new Map();
+
+for (let i = 0; i < nodes.length; i++) {
+  const n = nodes[i];
+  const pos = n.pos || [0,0,0];
+  const col = n.color || "#CC55CC";
+  const solid = shapes[i % shapes.length];
+  const geo = geos[solid];
+  const mat = new THREE.MeshStandardMaterial({color:col,roughness:0.2,metalness:0.15,emissive:col,emissiveIntensity:0.3});
+  const mesh = new THREE.Mesh(geo,mat);
+  mesh.position.set(pos[0],pos[1],pos[2]);
+  const sz = n.size || (0.5 + Math.min((n.loc || 50) / 500, 1.5));
+  mesh.scale.setScalar(sz);
+  mesh.userData = n;
+  ng.add(mesh);
+
+  if (isFile) {
+    nodemap.set(n.id, mesh);
+    if (["FunctionDef","AsyncFunctionDef","ClassDef","Import","ImportFrom"].includes(n.type)) {
+      const div = document.createElement("div");
+      div.className = "label";
+      div.textContent = (n.name || "").slice(0,16) + ((n.name || "").length > 16 ? "…" : "");
+      const lbl = new CSS2DObject(div);
+      lbl.position.set(0,sz+0.4,0);
+      mesh.add(lbl);
+    }
+  } else {
+    nodemap.set(n.file, mesh);
+    const div = document.createElement("div");
+    div.className = "label";
+    div.textContent = n.stem.slice(0,16) + (n.stem.length > 16 ? "…" : "");
+    const lbl = new CSS2DObject(div);
+    lbl.position.set(0,sz+0.5,0);
+    mesh.add(lbl);
+  }
+}
+
+// Edges
+
+const emat = new THREE.LineBasicMaterial({color:"#446688",transparent:true,opacity:0.65});
+
+if (isFile) {
+  for (const e of (edgeData || [])) {
+    const fromM = nodemap.get(e.from);
+    const toM = nodemap.get(e.to);
+    if (!fromM || !toM) continue;
+    const g = new THREE.BufferGeometry().setFromPoints([fromM.position,toM.position]);
+    eg.add(new THREE.Line(g,emat));
+  }
+} else {
+  for (const m of nodes) {
+    const fromM = nodemap.get(m.file);
+    if (!fromM) continue;
+    for (const target of (m.import_targets || [])) {
+      const toM = nodemap.get(target);
+      if (!toM) continue;
+      const g = new THREE.BufferGeometry().setFromPoints([fromM.position,toM.position]);
+      eg.add(new THREE.Line(g,emat));
+    }
+  }
+}
+
+// Click
+const rc = new THREE.Raycaster();
+const mp = new THREE.Vector2();
+const panel = document.getElementById("panel");
+const sn = document.getElementById("sname");
+
+addEventListener("click",ev => {
+  mp.x = (ev.clientX / innerWidth) * 2 - 1;
+  mp.y = -(ev.clientY / innerHeight) * 2 + 1;
+  rc.setFromCamera(mp,cam);
+  const hits = rc.intersectObjects(ng.children);
+  if (hits.length > 0) {
+    const ud = hits[0].object.userData;
+    if (!ud || !ud.name) return;
+    sn.textContent = ud.name;
+
+    if (isFile) {
+      panel.innerHTML = "<h3>" + esc(ud.name) + "</h3><span class='role' style='background:"+ud.color+"33;color:"+ud.color+";border:1px solid "+ud.color+"55'>"+ud.type+"</span>" + (ud.code ? "<pre style='margin-top:8px;color:#aaa;white-space:pre-wrap;max-height:50vh;overflow-y:auto'>" + esc(ud.code) + "</pre>" : "");
+    } else {
+      const funcs = (ud.functions || []).slice(0,10).join(", ") + ((ud.functions || []).length > 10 ? "…" : "");
+      const cls = (ud.classes || []).slice(0,8).join(", ") + ((ud.classes || []).length > 8 ? "…" : "");
+      const imps = (ud.imports || []).slice(0,8).join(", ") + ((ud.imports || []).length > 8 ? "…" : "");
+      panel.innerHTML = "<h3>"+esc(ud.name)+"</h3><span class='role' style='background:"+ud.color+"33;color:"+ud.color+";border:1px solid "+ud.color+"55'>"+ud.role+"</span><p style='margin-top:8px;color:#aaa'>"+ud.rel_path+" ("+ud.loc+" LOC)</p>"+ (funcs ? "<div class='funcs' style='margin-top:4px'>fns: "+funcs+"</div>" : "")+ (cls ? "<div class='classes' style='margin-top:2px'>cls: "+cls+"</div>" : "")+ (imps ? "<div class='imports' style='margin-top:2px'>imports: "+imps+"</div>" : "");
+    }
+    panel.style.display = "block";
+  } else {
+    sn.textContent = "—";
+    panel.style.display = "none";
+  }
+});
+
+function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}
+
+addEventListener("keydown",e => {
+  if (e.key === "r"){cam.position.set(12,8,16);ctrl.target.set(0,0,0);ctrl.update()}
+  if (e.key === "f"){cam.position.set(0,0,22);ctrl.target.set(0,0,0);ctrl.update()}
+  if (e.key === "t"){cam.position.set(0,20,0.1);ctrl.target.set(0,0,0);ctrl.update()}
+  if (e.key === "Escape"){panel.style.display = "none";wn.textContent = "—"}
+});
+
+const wn = document.getElementById("sname");  // fix typo from previous
+function anim(){
+  requestAnimationFrame(anim);
+  ctrl.update();
+  rend.render(scene,cam);
+  lr.render(scene,cam);
+}
+anim();
+
+addEventListener("resize",() => {
+  cam.aspect = innerWidth/innerHeight;cam.updateProjectionMatrix();
+  rend.setSize(innerWidth,innerHeight);
+  lr.setSize(innerWidth,innerHeight);
+});
+
+</script>
+</body>
+</html>

@@ -19,7 +19,7 @@ from pathlib import Path
 from .env import load_swiszcli_env
 
 
-DEFAULT_SWISZARD_PATH = "/home/ziggibot/swiszard"
+DEFAULT_SWISZARD_PATH = "/home/ziggibot/theSwiszard/swiszard"
 
 # Load swiszcli .env so os.environ picks up API keys
 load_swiszcli_env()
