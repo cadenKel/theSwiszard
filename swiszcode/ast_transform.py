@@ -350,6 +350,9 @@ _RE_INSERT = re.compile(
     r'^ast\s+insert\s+(\S+)\s+after\s+(\S+)\s+in\s+(\S+)\s*$')
 _RE_LINT = re.compile(r'^ast\s+lint\s+(\S+)\s*$')
 _RE_FIX = re.compile(r'^ast\s+fix\s+(\S+)\s*$')
+_RE_RENAME_REPO = re.compile(r'^ast\s+rename\s+(\S+)\s+to\s+(\S+)\s+in\s+(\S+)\s*$')
+_RE_VERIFY = re.compile(r'^ast\s+verify\s+(\S+)\s*$')
+_RE_UNDO = re.compile(r'^ast\s+undo\s+last\s+in\s+(\S+)\s*$')
 
 
 def dispatch(task: str) -> str:
@@ -431,6 +434,22 @@ def dispatch(task: str) -> str:
         except Exception as e:
             return f"ast insert: {e}"
 
+    # ast rename (repo-wide via rope)
+    m = _RE_RENAME_REPO.match(task)
+    if m:
+        root = m.group(3)
+        if _Path(root).is_dir():
+            try:
+                from swiszcode.ast_rope import rename_repo
+                r = rename_repo(m.group(1), m.group(2), root)
+                if "error" in r:
+                    return f"ast rename: {r['error']}"
+                files = ', '.join(r.get('changed_files', [])[:5])
+                return f"ast rename: {m.group(1)} -> {m.group(2)} in {len(r.get('changed_files',[]))} files: {files}"
+            except Exception as e:
+                return f"ast rename: {e}"
+        # Falls through to single-file rename below if root is a file
+
     # ast lint
     m = _RE_LINT.match(task)
     if m:
@@ -442,6 +461,30 @@ def dispatch(task: str) -> str:
             return _json.dumps(r, separators=(",", ":"))
         except Exception as e:
             return f"ast lint: {e}"
+
+    # ast verify
+    m = _RE_VERIFY.match(task)
+    if m:
+        try:
+            from swiszcode.ast_lint import verify
+            r = verify(m.group(1))
+            if "error" in r:
+                return f"ast verify: {r['error']}"
+            return _json.dumps(r, separators=(",", ":"))
+        except Exception as e:
+            return f"ast verify: {e}"
+
+    # ast undo
+    m = _RE_UNDO.match(task)
+    if m:
+        try:
+            from swiszcode.ast_lint import undo
+            r = undo(m.group(1))
+            if not r["restored"]:
+                return f"ast undo: {r['reason']}"
+            return f"ast undo: restored {m.group(1)} from .bak (hash: {r['new_hash']})"
+        except Exception as e:
+            return f"ast undo: {e}"
 
     # ast fix
     m = _RE_FIX.match(task)
