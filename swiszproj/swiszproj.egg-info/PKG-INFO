@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: swiszproj
+Version: 0.1.0
+Summary: Swiszard project management substrate (mind palace)
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: httpx>=0.27
+Requires-Dist: pydantic>=2.9
+
+moving swiszproj code

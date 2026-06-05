@@ -847,7 +847,7 @@ def code_search(req: CodeSearchRequest):
 
 
 # ── projects (project-manager substrate) ─────────────────────────────────────
-from . import projects as _pm
+from swiszproj import server_engine as _pm
 
 _PM_INIT_DONE = False
 _PM_INIT_LOCK = threading.Lock()

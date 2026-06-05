@@ -19,7 +19,7 @@ import sqlite3
 import time
 from typing import Any
 
-from .embed import embed_to_blob, embed, blob_to_array, cosine_similarity
+from memory_server.embed import embed_to_blob, embed, blob_to_array, cosine_similarity
 
 NODE_KINDS = {"objective", "task", "decision", "question", "artifact", "note"}
 NODE_STATES = {"proposed", "active", "blocked", "done", "abandoned", "deprecated", "committed", "superseded", "reverted", "open", "researching", "answered", "invalidated", "parked", "removed", "archived", "satisfied"}

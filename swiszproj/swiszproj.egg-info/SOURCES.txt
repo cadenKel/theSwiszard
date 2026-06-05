@@ -1,0 +1,13 @@
+README.md
+pyproject.toml
+swiszproj/__init__.py
+swiszproj/client.py
+swiszproj/dispatch.py
+swiszproj/server_engine.py
+swiszproj/state.py
+swiszproj/wizards.py
+swiszproj.egg-info/PKG-INFO
+swiszproj.egg-info/SOURCES.txt
+swiszproj.egg-info/dependency_links.txt
+swiszproj.egg-info/requires.txt
+swiszproj.egg-info/top_level.txt
