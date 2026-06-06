@@ -1158,6 +1158,46 @@ def pm_orient(req: PMOrientRequest):
 
 # ── PM health check ───────────────────────────────────────────────────────
 
+@app.post("/project/recall_triggers")
+def pm_recall_triggers(req: PMInjectRequest):
+    """Return pm_nodes whose trigger phrases most closely match query."""
+    _ensure_pm()
+    conn = _get_conn()
+    from swiszproj.server_engine import embed_to_blob, blob_to_array, cosine_similarity
+
+    active_id = None
+    if req.active_project:
+        proj = _pm.get_project_by_name(conn, req.active_project)
+        if proj:
+            active_id = proj["id"]
+
+    qv = blob_to_array(embed_to_blob(req.query))
+    trig_rows = conn.execute(
+        "SELECT t.id, t.node_id, t.text, t.vec, n.title, n.kind, n.state, n.project_id "
+        "FROM pm_trigger t JOIN pm_node n ON n.id=t.node_id "
+        "WHERE n.state NOT IN ('dead','deprecated','done','archived','satisfied','superseded','invalidated','reverted','removed','abandoned')"
+    ).fetchall()
+
+    scored = {}
+    for tr in trig_rows:
+        if active_id and tr["project_id"] != active_id:
+            continue
+        score = cosine_similarity(qv, blob_to_array(bytes(tr["vec"])))
+        nid = tr["node_id"]
+        if nid not in scored or score > scored[nid]["score"]:
+            scored[nid] = {
+                "node_id": nid,
+                "trigger_text": tr["text"],
+                "score": round(score, 4),
+                "title": tr["title"],
+                "kind": tr["kind"],
+                "state": tr["state"],
+            }
+
+    results = sorted(scored.values(), key=lambda x: -x["score"])[:req.top_k]
+    return {"query": req.query, "matches": results}
+
+
 @app.get("/project/health")
 def pm_health_endpoint():
     """Return PM tree health: orphans, stale nodes, empty-body nodes, trust score."""
