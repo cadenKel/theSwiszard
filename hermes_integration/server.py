@@ -94,6 +94,38 @@ def swiszard_do(task: str) -> str:
     return _inject_wrap(task, _router_do(task, dry_run=False))
 
 
+def _wrap_result(raw: str) -> str:
+    """Compress agent output for Hermes: [ok]/[err] prefix + 2000-char cap."""
+    if not raw:
+        return "[ok] (empty output)"
+    raw = raw.strip()
+    is_err = raw.startswith("[err]") or "error" in raw[:40].lower() or "traceback" in raw[:80].lower()
+    prefix = "[err] " if is_err else "[ok] "
+    body = raw[len("[err] "):].strip() if raw.startswith("[err]") else raw
+    body = body[len("[ok] "):].strip() if body.startswith("[ok]") else body
+    if len(body) > 2000:
+        body = body[:1960] + "...(truncated)"
+    return prefix + body
+
+
+# ── Tier-2 agent tool ────────────────────────────────────────────────────
+
+@mcp.tool()
+def swiszard_agent_do(spec: str, timeout: int = 300) -> str:
+    """Full swiszard agent: wizard routing + LLM membrane. Pass natural-language spec. Local machine executes. Slower than swiszard_do — use only when deterministic handlers don't cover the task."""
+    if not spec or not spec.strip():
+        return "[err] swiszard_agent_do: empty spec"
+    try:
+        from swiszcli.headless import run_headless
+        raw = run_headless(spec, timeout=timeout)
+    except ImportError as e:
+        return f"[err] headless not available: {e}"
+    except Exception as e:
+        return f"[err] {type(e).__name__}: {e}"
+    return _wrap_result(raw)
+
+
+
 # ── PM write tools ───────────────────────────────────────────────────────
 
 @mcp.tool()
