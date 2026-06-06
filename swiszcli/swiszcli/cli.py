@@ -136,21 +136,31 @@ def print_resurfaced_memories(mems: list, *, limit: int = 20) -> None:
         print(c(row, DIM))
 
 
-def launch_wizard(name: str, runner: PTKRunner, *, initial: dict | None = None) -> None:
+def launch_wizard(name: str, runner: PTKRunner, *, initial: dict | None = None,
+                   parent_trace_id: str | None = None) -> None:
     try:
         wiz = resolve(name)
     except KeyError as e:
         print(c(str(e), RED))
         return
     print(c(f"── wizard: {wiz.name} ──", CYAN))
+    tw = tracelog.get_default()
+    trace_id = tw.start(wiz.name, "launch_wizard", parent_id=parent_trace_id,
+                        initial_ctx=initial or {}) if tw else None
     try:
         result = wiz.run(runner, initial=initial)
     except Cancelled:
+        if tw and trace_id:
+            tw.end(trace_id, initial or {}, None, "cancelled")
         print(c("(cancelled)", YELLOW))
         return
     except Exception as e:
+        if tw and trace_id:
+            tw.end(trace_id, initial or {}, str(e), "error")
         print(c(f"wizard error: {type(e).__name__}: {e}", RED))
         return
+    if tw and trace_id:
+        tw.end(trace_id, initial or {}, result, "ok")
     print(c(f"  → {result}", GREEN))
 
 
@@ -1627,6 +1637,29 @@ def main():
             print(c(f"  P0: close_session failed: {_e}", YELLOW))
         try:
             _swisz_call_log.close()
+        except Exception:
+            pass
+        # Wire chain_credit replay on session end (#275)
+        try:
+            tw = tracelog.get_default()
+            if tw:
+                from . import chain_credit
+                recent = tw.recent(n=50)
+                roots = [t for t in recent if t.get('parent_id') is None and t.get('status') == 'ok']
+                if roots:
+                    last_root = roots[0]
+                    last_result_json = last_root.get('result_json') or '{}'
+                    import json as _json
+                    try:
+                        corrected = _json.loads(last_result_json)
+                        corrected_str = str(corrected)
+                    except Exception:
+                        corrected_str = last_result_json
+                    assignments = chain_credit.replay_trace_chain(tw, last_root['id'], corrected_str)
+                    report = chain_credit.format_assignment_report(assignments)
+                    if report.strip():
+                        import sys
+                        print(report, file=sys.stderr)
         except Exception:
             pass
         mem.close()
