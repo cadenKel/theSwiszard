@@ -58,10 +58,8 @@ from .context_store import ContextStore as _CtxStore
 from .router import Router as _Router
 from .chunks import ChunkCapture as _ChunkCapture, render_chunks as _render_chunks
 from .router_hint import router_hint as _router_hint
-from .learn import Learner as _Learner
 from .scratchpad import ScratchpadStore as _SPStore
 from .scratchpad_wizards import ScratchpadOps as _SPOps, parse_and_dispatch as _sp_dispatch
-from .tool_synthesis import ToolSynthesizer as _ToolSynth, extract_shell as _extract_shell, capture_shell_fallback as _capture_fallback
 from .sequence_learn import SequenceStore as _SeqStore, render_sequence_hint as _render_seq_hint
 from swiszproj.state import ProjectStore as _ProjStore, detect_project as _detect_proj
 from .edit_engine import EditEngine as _EditEngine
@@ -1095,23 +1093,7 @@ def main():
                 pass
         except Exception:
             pass
-        # P1 observational learning: success = result not starting with ERROR or BLOCKED
-        try:
-            _user_text = getattr(state, "last_user_input", "") or ""
-            _success = not (result.startswith("ERROR") or result.startswith("BLOCKED"))
-            _outcome = _p0_learner.observe(_user_text, task, success=_success)
-            _act = _outcome["action"]
-            if _act == "learn": _stats_incr("examples_learned")
-            elif _act == "reinforce": _stats_incr("examples_reinforced")
-            if _act == "learn":
-                _w = _outcome["wizard"]
-                _id = _outcome["id"]
-                print(c(f"  learn▸ +example wizard={_w} id={_id}", DIM))
-            elif _act == "reinforce":
-                _id = _outcome["id"]
-                print(c(f"  learn▸ +win on example id={_id}", DIM))
-        except Exception as _e:
-            print(c(f"  learn▸ failed: {_e}", YELLOW))
+# P1 observational learning removed — router feedback loop now handles this (routes.db)
         preview = result.replace("\n", " ")[:200]
         suffix = "..." if len(result) > 200 else ""
         ok = "ok" if not result.startswith("ERROR") else "ERR"
@@ -1151,7 +1133,6 @@ def main():
     except Exception as _p0_e:
         print(c(f"  P0: router seed failed (continuing without hints): {_p0_e}", YELLOW))
     _p0_capture = _ChunkCapture(store=_p0_store, session_id=session_id, window_size=8)
-    _p0_learner = _Learner(_p0_store)
     state.last_user_input = ""
     state.last_p0_router_hint = ""
     state.last_p0_chunks_block = ""

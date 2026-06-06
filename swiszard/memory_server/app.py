@@ -848,6 +848,7 @@ def code_search(req: CodeSearchRequest):
 
 # ── projects (project-manager substrate) ─────────────────────────────────────
 from swiszproj import server_engine as _pm
+from swiszproj import pm_backup
 
 _PM_INIT_DONE = False
 _PM_INIT_LOCK = threading.Lock()
@@ -908,12 +909,7 @@ class PMProposeParentRequest(BaseModel):
     top_k: int = 5
 
 
-@app.post("/project/create")
-def pm_create(req: PMCreateRequest):
-    _ensure_pm()
-    conn = _get_conn()
-    pid = _pm.get_or_create_project(conn, req.name)
-    return {"id": pid, "name": req.name}
+# old /project/create replaced by dedup-aware version below
 
 
 @app.get("/project/list")
@@ -928,6 +924,11 @@ def pm_add_node(req: PMAddNodeRequest):
     conn = _get_conn()
     pid = _pm.get_or_create_project(conn, req.project)
     try:
+        pm_backup.log_mutation("INSERT", "pm_node", 0,
+                               new_row={"project": req.project, "kind": req.kind,
+                                        "state": req.state, "title": req.title,
+                                        "body_preview": req.body[:200]},
+                               metadata={"endpoint": "/project/add_node"})
         node_id = _pm.insert_node(
             conn, pid, req.body, kind=req.kind, state=req.state,
             parent_id=req.parent_id, tags=req.tags, title=req.title,
@@ -1014,6 +1015,9 @@ class PMTransitionRequest(BaseModel):
 def pm_transition(req: PMTransitionRequest):
     _ensure_pm()
     try:
+        pm_backup.log_mutation("UPDATE", "pm_node", req.node_id,
+                               new_row={"state": req.state},
+                               metadata={"endpoint": "/project/transition"})
         result = _pm.state_transition(_get_conn(), req.node_id, req.state)
         return result
     except ValueError as e:
@@ -1035,3 +1039,149 @@ def pm_status(req: PMStatusRequest):
     if not proj:
         raise HTTPException(404, f"unknown project: {req.project}")
     return _pm.project_status(conn, proj["id"], max_bottlenecks=req.max_bottlenecks)
+
+
+# ── safety endpoints ──────────────────────────────────────────────────────
+
+class PMDeleteRequest(BaseModel):
+    node_id: int
+    confirmation_token: str
+    expected_title: str = ""
+
+
+@app.post("/project/delete_node")
+def pm_delete_node(req: PMDeleteRequest):
+    _ensure_pm()
+    try:
+        from swiszproj import pm_backup
+        pm_backup.log_mutation("DELETE", "pm_node", req.node_id,
+                               metadata={"endpoint": "/project/delete_node",
+                                         "expected_title": req.expected_title[:80]})
+        result = _pm.delete_node(_get_conn(), req.node_id,
+                                 req.confirmation_token, req.expected_title)
+        return result
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class PMReparentRequest(BaseModel):
+    node_id: int
+    new_parent_id: int
+
+
+@app.post("/project/reparent")
+def pm_reparent(req: PMReparentRequest):
+    _ensure_pm()
+    try:
+        from swiszproj import pm_backup
+        pm_backup.log_mutation("UPDATE", "pm_node", req.node_id,
+                               new_row={"parent_id": req.new_parent_id},
+                               metadata={"endpoint": "/project/reparent"})
+        result = _pm.reparent_node(_get_conn(), req.node_id, req.new_parent_id)
+        return result
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+# Patch /project/create to use dedup-aware get_or_create
+@app.post("/project/create")
+def pm_create(req: PMCreateRequest):
+    _ensure_pm()
+    conn = _get_conn()
+    pid, created = _pm.get_or_create_project_dedup(conn, req.name)
+    from swiszproj import pm_backup
+    if created:
+        pm_backup.log_mutation("INSERT", "pm_project", pid,
+                               new_row={"name": req.name},
+                               metadata={"endpoint": "/project/create"})
+    return {"id": pid, "name": req.name, "created": created}
+
+# ── PM orientation endpoint (for proactive injection) ─────────────────────
+
+class PMOrientRequest(BaseModel):
+    project: str = "swiszard"
+
+@app.post("/project/orient")
+def pm_orient(req: PMOrientRequest):
+    """Return a compact orientation block for proactive injection.
+    Format: PM: swiszard - North star: active - 74/101 done (16 frontier) - modules: hermes(3a) swiszcode(5a) swisznet(3a) - trust: 95% (0 orphans, 2 stale)"""
+    _ensure_pm()
+    conn = _get_conn()
+    proj = _pm.get_project_by_name(conn, req.project)
+    if not proj:
+        raise HTTPException(404, f"unknown project: {req.project}")
+    
+    pid = proj["id"]
+    status = _pm.project_status(conn, pid)
+    tree = _pm.project_tree(conn, pid)
+    nodes = {n["id"]: n for n in tree}
+    
+    # Module branches
+    modules = {"swiszproj":42, "swiszmem":43, "swiszcli":44, "swiszcode":52, "swisznet":74, "hermes":222}
+    mod_counts = {}
+    for name, root_id in modules.items():
+        if root_id in nodes:
+            active = done = blocked = 0
+            def count_states(nid):
+                nonlocal active, done, blocked
+                n = nodes.get(nid)
+                if not n:
+                    return
+                s = n["state"]
+                if s == "active": active += 1
+                elif s in ("done","satisfied"): done += 1
+                elif s == "blocked": blocked += 1
+                for child in [c for c in tree if c.get("parent_id") == nid]:
+                    count_states(child["id"])
+            count_states(root_id)
+            if active > 0:
+                mod_counts[name] = f"{active}a"
+    
+    mod_str = " ".join(f"{k}({v})" for k, v in mod_counts.items())
+    
+    # Health: count orphans
+    orphan_ids = [n["id"] for n in tree if n.get("parent_id") and n["parent_id"] not in nodes]
+    # Count stale frontier (>7 days)
+    now = int(time.time())
+    stale = [f for f in status.get("frontier", []) if now - f["updated"] > 7*86400]
+    # Count empty-body nodes
+    empty_bodies = [n["id"] for n in tree if n.get("body", "").strip() == "" and n["state"] == "active"]
+    
+    real_issues = len(orphan_ids) + len(stale)
+    trust = max(0, 100 - real_issues * 5)
+    
+    block = f'PM: {req.project} - {status["summary"]} - modules: {mod_str or "none active"} - trust: {trust}%'
+    if issues:
+        block += f' ({len(orphan_ids)} orphans, {len(stale)} stale, {len(empty_bodies)} empty)'
+    
+    return {"block": block, "trust": trust, "issues": {"orphans": orphan_ids, "stale": len(stale), "empty": empty_bodies}}
+
+# ── PM health check ───────────────────────────────────────────────────────
+
+@app.get("/project/health")
+def pm_health_endpoint():
+    """Return PM tree health: orphans, stale nodes, empty-body nodes, trust score."""
+    _ensure_pm()
+    conn = _get_conn()
+    tree = _pm.project_tree(conn, 1)  # swiszard
+    nodes = {n["id"]: n for n in tree}
+    
+    orphans = [n for n in tree if n.get("parent_id") and n["parent_id"] not in nodes]
+    now = int(time.time())
+    stale = [n for n in tree if n["state"] == "active" and now - n["updated"] > 7*86400]
+    empty = [n for n in tree if (n.get("body") or "").strip() == "" and n["state"] == "active"]
+    wrong_state = [n for n in tree if n["kind"] in ("task","artifact") and n["state"] == "satisfied"]
+    
+    critical = len(orphans) + len(stale) + len(wrong_state)
+    trust = max(0, 100 - critical * 5)
+    
+    return {
+        "trust": trust,
+        "issues": {
+            "orphans": [{"id": n["id"], "title": n["title"][:60], "parent_id": n["parent_id"]} for n in orphans[:5]],
+            "stale": len(stale),
+            "empty_bodies": len(empty),
+            "wrong_state": len(wrong_state),
+        }
+    }
+

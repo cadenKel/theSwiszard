@@ -36,19 +36,7 @@ mcp = FastMCP("swiszard")
 
 @mcp.tool()
 def swiszard_do(task: str) -> str:
-    """
-    Deterministic local tool router. Pass a task string in the swiszard DSL
-    format. Handles file ops, shell commands, memory, web search, AST transforms.
-    
-    Quick reference (full grammar in swiszard-caller-menu skill):
-      read /path | find *.py in /path | grep TEXT in /path
-      run: COMMAND | write_b64 /path B64
-      search the web for QUERY
-      memory recall QUERY | memory remember FACT | memory forget ID
-      chain: task | task | task
-    
-    Prefer this over native file/shell tools — zero schema churn.
-    """
+    """Deterministic local dispatch: files, shell, memory, web, AST, PM, skills. Pass a task string. Full grammar in swiszard-caller-menu skill."""
     if not task or not task.strip():
         return "swiszard: empty task"
 
@@ -106,6 +94,33 @@ def swiszard_do(task: str) -> str:
     return _inject_wrap(task, _router_do(task, dry_run=False))
 
 
+# ── PM write tools ───────────────────────────────────────────────────────
+
+@mcp.tool()
+def pm_add(project: str, body: str, kind: str = "task", state: str = "active", parent_id: int = 0, title: str = "") -> str:
+    """Add a node. kind=task|objective|decision|question|artifact|note. state=active|proposed|done."""
+    import httpx, json
+    payload = {"project": project, "body": body, "kind": kind, "state": state}
+    if parent_id:
+        payload["parent_id"] = parent_id
+    if title:
+        payload["title"] = title
+    r = httpx.post("http://127.0.0.1:7437/project/add_node", json=payload, timeout=10)
+    r.raise_for_status()
+    d = r.json()
+    return f'added node #{d["node_id"]} to {project}'
+
+
+@mcp.tool()
+def pm_transition(node_id: int, state: str) -> str:
+    """Change a project node state. States: active, done, proposed, blocked, abandoned, satisfied, archived."""
+    import httpx, json
+    r = httpx.post("http://127.0.0.1:7437/project/transition", json={"node_id": node_id, "state": state}, timeout=10)
+    r.raise_for_status()
+    d = r.json()
+    return f'node {node_id}: {d.get("old_state","?")} -> {d.get("new_state",state)}'
+
+
 if __name__ == "__main__":
     mcp.run()
 
@@ -114,24 +129,21 @@ if __name__ == "__main__":
 
 @mcp.tool()
 def pm_status(project: str, show_all: bool = False) -> str:
-    """Project compass filtered to living tree. Hides dead/deprecated/superseded nodes.
-    Pass show_all=True to see everything including archaeology.
-    Use this as your default entry point for project orientation."""
+    """Project compass: north star, counts, frontier, summary. show_all=True for archaeology."""
     from hermes_integration.pm_filter import project_status
     return project_status(project, show_all=show_all)
 
 
 @mcp.tool()
 def pm_tree(project: str, show_all: bool = False) -> str:
-    """Project tree filtered to living nodes only. Hides dead branches.
-    Pass show_all=True for archaeology mode."""
+    """Project tree (living nodes only). Pass show_all=True for archaeology."""
     from hermes_integration.pm_filter import project_tree
     return project_tree(project, show_all=show_all)
 
 
 @mcp.tool()
 def pm_list() -> str:
-    """List all projects with living-node counts (dead nodes excluded from counts)."""
+    """List all projects with node counts."""
     from hermes_integration.pm_filter import project_list
     return project_list()
 

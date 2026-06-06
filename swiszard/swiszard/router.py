@@ -46,6 +46,7 @@ from .handlers import (
     handler_edit,
     handler_skill,
     handler_ast_transform,
+    handler_ast_pin,
 )
 
 # ── constants ─────────────────────────────────────────────────────────────────
@@ -69,6 +70,7 @@ HANDLER_MAP: dict[str, callable] = {
     "handler_edit": handler_edit,
     "handler_skill": handler_skill,
     "handler_ast_transform": handler_ast_transform,
+    "handler_ast_pin": handler_ast_pin,
 }
 
 HELP_TEXT = (
@@ -97,6 +99,8 @@ HELP_TEXT = (
     "  ast wrap FUNC in FILE                  — wrap function body in try/except\n"
     "  ast decorate FUNC in FILE with @DEC    — add decorator to function\n"
     "  ast format FILE                        — black format + parse verify\n"
+    "  ast pin claim NID file:PATH type:T name:N   — pin AST claim to PM node\n"
+    "  ast pin verify NID                           — verify claims on PM node\n"
     "\nSPECIAL\n"
     "  help | route: T | json: T | safety: T | chain: a | b\n"
 )
@@ -129,6 +133,8 @@ def _route_by_rules(task: str) -> str | None:
     # File-write: 'write_b64 /path <base64>' — quoting-proof
     if re.match(r"^skill\s+(view|list|create|patch|delete)\b", lower):
         return "handler_skill"
+    if re.match(r"^ast\s+pin\s+", lower):
+        return "handler_ast_pin"
     if re.match(r"^ast\s+", lower):
         return "handler_ast_transform"
     if re.match(r"^write_b64\s+/", lower):
@@ -309,7 +315,27 @@ def swiszard_do(task: str, dry_run: bool = False) -> str:
         narrate(f"rule-based routing to {rule_handler}")
         if dry_run:
             return f"[dry-run] would route to: {rule_handler}"
-        return HANDLER_MAP[rule_handler](task)
+        result = HANDLER_MAP[rule_handler](task)
+        # Close feedback loop even for rule-based routes
+        try:
+            is_err = isinstance(result, str) and (
+                result.startswith("handler_file_read: could not") or
+                result.startswith("handler_file_find: could not") or
+                result.startswith("handler_shell: command timed") or
+                result.startswith("handler_shell: invalid") or
+                result.startswith("handler_web_search:") or
+                result.startswith("handler_file_write:") or
+                result.startswith("handler_edit:") or
+                result.startswith("handler_skill:") or
+                result.startswith("handler_ast_transform:") or
+                result.startswith("memory recall failed:") or
+                result.startswith("memory remember failed:") or
+                result.startswith("memory forget failed:")
+            )
+            swiszard_feedback(task, rule_handler, not is_err)
+        except Exception:
+            pass
+        return result
 
     # Load examples once for TF-IDF and embeddings
     rows = _load_examples()
@@ -337,7 +363,13 @@ def swiszard_do(task: str, dry_run: bool = False) -> str:
             narrate(f"tfidf routing to {best['handler']} (sim={best['sim']:.3f})")
             if dry_run:
                 return f"[dry-run] would route to: {best['handler']}"
-            return HANDLER_MAP[best["handler"]](task)
+            result = HANDLER_MAP[best["handler"]](task)
+            try:
+                is_err = isinstance(result, str) and result.startswith("handler_")
+                swiszard_feedback(task, best["handler"], not is_err)
+            except Exception:
+                pass
+            return result
 
     # ── embed (fallback) ─────────────────────────────────────────────────────
     t_embed = time.monotonic()
@@ -404,9 +436,9 @@ def swiszard_do(task: str, dry_run: bool = False) -> str:
     # ── dispatch ──────────────────────────────────────────────────────────────
     handler_fn = HANDLER_MAP[chosen]
     t_dispatch = time.monotonic()
+    was_success = True
     try:
         result = handler_fn(task)
-        monitor = get_monitor()
         # Detect handler failures returned as strings (not exceptions)
         is_error = isinstance(result, str) and (
             result.startswith("handler_file_read: could not") or
@@ -436,14 +468,19 @@ def swiszard_do(task: str, dry_run: bool = False) -> str:
             result.startswith("swiszard: no confident handler match") or
             result.startswith("swiszard: ambiguous task")
         )
-        detail = result[:120] if is_error else ""
-        monitor.record(chosen, not is_error, detail,
-                       int((time.monotonic() - t_dispatch) * 1000))
+        was_success = not is_error
     except Exception as e:
-        monitor = get_monitor()
-        monitor.record(chosen, False, f"{type(e).__name__}: {e}",
-                       int((time.monotonic() - t_dispatch) * 1000))
+        was_success = False
+        result = f"{type(e).__name__}: {e}"
         raise
+    finally:
+        # CLOSE THE FEEDBACK LOOP: every dispatch feeds the example bank.
+        # This is the single change that activates the entire learning loop.
+        try:
+            swiszard_feedback(task, chosen, was_success)
+        except Exception as _fe:
+            import sys as _sys
+            print(f"[swiszard] feedback error: {_fe}", file=_sys.stderr)
 
     total_ms = int((time.monotonic() - t0) * 1000)
     narrate(f"completed in {total_ms}ms, returning {len(result)} chars")
@@ -490,4 +527,10 @@ def swiszard_feedback(task: str, handler_used: str, was_good: bool) -> str:
         else:
             if best_id is not None:
                 increment_fail(conn, best_id)
+            else:
+                # Record the failure as a new example so the bank learns what NOT to route.
+                blob = embed_to_blob(task)
+                new_id = insert_example(conn, task, handler_used, blob)
+                conn.execute("UPDATE examples SET fail_count=1 WHERE id=?", (new_id,))
+                conn.commit()
             return f"swiszard_feedback: recorded failure for {handler_used}."

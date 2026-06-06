@@ -21,7 +21,7 @@ from typing import Any
 
 from memory_server.embed import embed_to_blob, embed, blob_to_array, cosine_similarity
 
-NODE_KINDS = {"objective", "task", "decision", "question", "artifact", "note"}
+NODE_KINDS = {"objective", "task", "decision", "question", "artifact", "note", "north_star"}
 NODE_STATES = {"proposed", "active", "blocked", "done", "abandoned", "deprecated", "committed", "superseded", "reverted", "open", "researching", "answered", "invalidated", "parked", "removed", "archived", "satisfied"}
 
 FRAME_WINDOW_SENTENCES = 3
@@ -185,6 +185,16 @@ def insert_node(conn, project_id: int, body: str, kind: str = "objective",
         raise ValueError(f"unknown kind {kind!r}")
     if state not in NODE_STATES:
         raise ValueError(f"unknown state {state!r}")
+    if kind == 'north_star':
+        existing = conn.execute(
+            "SELECT id FROM pm_node WHERE project_id=? AND kind='north_star'",
+            (project_id,)
+        ).fetchone()
+        if existing:
+            raise ValueError(
+                f"project already has a north_star node (#{existing[0]}). "
+                f"Only one north_star is allowed per project."
+            )
     now = int(time.time())
     title = title or _derive_title(body)
     body_vec = embed_to_blob(body)
@@ -223,7 +233,8 @@ def get_node(conn, node_id: int):
 
 def project_tree(conn, project_id: int) -> list[dict]:
     rows = conn.execute(
-        "SELECT id, parent_id, kind, state, title, created, updated "
+        "SELECT id, parent_id, kind, state, title, created, updated, "
+        "COALESCE(tags, '[]') as tags "
         "FROM pm_node WHERE project_id=? ORDER BY created",
         (project_id,),
     ).fetchall()
@@ -472,6 +483,9 @@ def inject_frames(conn, query: str, top_k: int = 4,
 # ── state transitions ───────────────────────────────────────────────────────
 
 KIND_STATES = {
+    # north_star lifecycle
+    "north_star": {"active", "satisfied"},
+
     # objective lifecycle
     "objective": {"proposed", "active", "satisfied", "abandoned"},
     # task lifecycle
@@ -570,7 +584,7 @@ def project_status(conn, project_id: int, max_bottlenecks: int = 5) -> dict:
             children_of.setdefault(pid, []).append(n["id"])
     
     # Count by state + kind
-    counts = {"objective": 0, "task": 0, "decision": 0, "question": 0, "artifact": 0, "note": 0,
+    counts = {"objective": 0, "task": 0, "decision": 0, "question": 0, "artifact": 0, "note": 0, "north_star": 0,
               "proposed": 0, "active": 0, "blocked": 0, "done": 0, "total": len(nodes)}
     for n in nodes:
         s = n["state"]
@@ -583,7 +597,7 @@ def project_status(conn, project_id: int, max_bottlenecks: int = 5) -> dict:
     # Frontier: active nodes with no active children (leaf active or blocked)
     frontier = []
     for n in nodes:
-        if n["state"] == "active":
+        if n["state"] == "active" and n["kind"] != "north_star":
             child_ids = children_of.get(n["id"], [])
             active_children = [cid for cid in child_ids if node_map.get(cid, {}).get("state") == "active"]
             if not active_children:
@@ -612,7 +626,14 @@ def project_status(conn, project_id: int, max_bottlenecks: int = 5) -> dict:
     done = counts.get("done", 0)
     total_touchable = done + in_flight + proposed_objectives
     
-    summary_parts = [f"Project: {done}/{total_touchable} nodes done ({done} done, {in_flight} in flight, {proposed_objectives} objectives)"]
+    # North star status
+    ns_nodes = [n for n in nodes if n["kind"] == "north_star"]
+    if ns_nodes:
+        ns_state = ns_nodes[0]["state"]
+        summary_parts = [f"North star: {ns_state}"]
+    else:
+        summary_parts = ["North star: missing"]
+    summary_parts.append(f"Project: {done}/{total_touchable} nodes done ({done} done, {in_flight} in flight, {proposed_objectives} objectives)")
     
     if bottlenecks:
         oldest = bottlenecks[0]
@@ -637,3 +658,87 @@ def project_status(conn, project_id: int, max_bottlenecks: int = 5) -> dict:
         "ideas": [{"id": n["id"], "title": n["title"], "kind": n["kind"]} for n in ideas[:10]],
         "summary": " — ".join(summary_parts),
     }
+
+
+# ── safety: delete node with confirmation ─────────────────────────────────
+
+def delete_node(conn, node_id: int, confirmation_token: str, expected_title: str = "") -> dict:
+    '''Delete a node. Requires confirmation_token == "DELETE-{node_id}-{title_slug}".
+    Also accepts expected_title as extra validation. Fails loud if node not found.'''
+    row = get_node(conn, node_id)
+    if not row:
+        raise ValueError(f"node {node_id} not found")
+    title_slug = re.sub(r'[^a-zA-Z0-9]', '-', row['title'].lower())[:40]
+    expected_token = f"DELETE-{node_id}-{title_slug}"
+    if confirmation_token.strip() != expected_token:
+        raise ValueError(f"confirmation mismatch: expected {expected_token}, got {confirmation_token.strip()}")
+    if expected_title and row['title'][:60] != expected_title[:60]:
+        raise ValueError(f"title mismatch: expected {expected_title[:60]!r}, got {row['title'][:60]!r}")
+    
+    # Save old row for backup
+    old_row = dict(row)
+    # Delete transactionally: frames first, then triggers, then node
+    conn.execute("DELETE FROM pm_frame WHERE node_id=?", (node_id,))
+    conn.execute("DELETE FROM pm_trigger WHERE node_id=?", (node_id,))
+    conn.execute("DELETE FROM pm_conflict WHERE node_a=? OR node_b=?", (node_id, node_id))
+    conn.execute("DELETE FROM pm_node WHERE id=?", (node_id,))
+    conn.commit()
+    return {"deleted": node_id, "title": old_row.get('title', '')}
+
+
+# ── safety: project dedup on create ───────────────────────────────────────
+
+def _slugify(name: str) -> str:
+    return re.sub(r'[^a-zA-Z0-9]', '', name.lower())
+
+def get_or_create_project_dedup(conn, name: str) -> tuple[int, bool]:
+    '''Like get_or_create_project but checks for slug-duplicate first.
+    Returns (project_id, was_created).'''
+    name = _sanitize_project_name(name)
+    row = conn.execute("SELECT id FROM pm_project WHERE name=?", (name,)).fetchone()
+    if row:
+        return row[0], False
+    
+    # Check slug dedup
+    slug = _slugify(name)
+    existing = conn.execute("SELECT id, name FROM pm_project").fetchall()
+    for ex_id, ex_name in existing:
+        if _slugify(ex_name) == slug:
+            return ex_id, False  # Return existing, don't create dup
+    
+    cur = conn.execute("INSERT INTO pm_project (name, created) VALUES (?, ?)",
+                       (name, int(time.time())))
+    conn.commit()
+    return cur.lastrowid, True
+
+
+# ── safety: reparent node (move under new parent) ─────────────────────────
+
+def reparent_node(conn, node_id: int, new_parent_id: int) -> dict:
+    '''Move a node under a new parent. Validates both exist and belong to same project.'''
+    node = get_node(conn, node_id)
+    if not node:
+        raise ValueError(f"node {node_id} not found")
+    parent = get_node(conn, new_parent_id)
+    if not parent:
+        raise ValueError(f"parent {new_parent_id} not found")
+    if node['project_id'] != parent['project_id']:
+        raise ValueError(f"cross-project reparent: node in project {node['project_id']}, parent in {parent['project_id']}")
+    if node_id == new_parent_id:
+        raise ValueError("cannot reparent a node to itself")
+    # Check for cycles: walk up from new_parent, ensure we don't hit node_id
+    cursor = new_parent_id
+    visited = set()
+    while cursor:
+        if cursor in visited:
+            break
+        visited.add(cursor)
+        if cursor == node_id:
+            raise ValueError("cycle detected: new parent is a descendant of the node")
+        p = get_node(conn, cursor)
+        cursor = p['parent_id'] if p and p['parent_id'] else None
+    
+    now = int(time.time())
+    conn.execute("UPDATE pm_node SET parent_id=?, updated=? WHERE id=?", (new_parent_id, now, node_id))
+    conn.commit()
+    return {"node_id": node_id, "old_parent": node['parent_id'], "new_parent": new_parent_id}

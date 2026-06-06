@@ -383,7 +383,7 @@ def dispatch(task: str) -> str:
             r = wrap(m.group(1), m.group(2))
             if not r["changed"]:
                 return f"ast wrap: no changes ({m.group(1)} already wrapped?)"
-            return f"ast wrap: wrapped '{m.group(1)}' in try/except in {m.group(2)}\n{r['diff']}"
+            return f"ast wrap: wrapped '{m.group(1)}' in try/except in {m.group(2)}\n{r['diff']}" + _pm_suggest(m.group(2), f"wrap {m.group(1)} with try/except")
         except Exception as e:
             return f"ast wrap: {e}"
 
@@ -392,7 +392,7 @@ def dispatch(task: str) -> str:
     if m:
         try:
             r = decorate(m.group(1), m.group(2), m.group(3))
-            return f"ast decorate: added @{m.group(3)} to '{m.group(1)}' in {m.group(2)}\n{r['diff']}"
+            return f"ast decorate: added @{m.group(3)} to '{m.group(1)}' in {m.group(2)}\n{r['diff']}" + _pm_suggest(m.group(2), f"decorate {m.group(1)} with {m.group(3)}")
         except Exception as e:
             return f"ast decorate: {e}"
 
@@ -403,7 +403,7 @@ def dispatch(task: str) -> str:
             r = format_file(m.group(1))
             if not r["changed"]:
                 return f"ast format: {m.group(1)} already formatted (no changes)"
-            return f"ast format: reformatted {m.group(1)}\n{r['diff']}"
+            return f"ast format: reformatted {m.group(1)}\n{r['diff']}" + _pm_suggest(m.group(1), "format with black")
         except Exception as e:
             return f"ast format: {e}"
 
@@ -412,7 +412,7 @@ def dispatch(task: str) -> str:
     if m:
         try:
             r = rename(m.group(1), m.group(2), m.group(3))
-            return f"ast rename: {m.group(1)} -> {m.group(2)} in {m.group(3)}\n{r['diff']}"
+            return f"ast rename: {m.group(1)} -> {m.group(2)} in {m.group(3)}\n{r['diff']}" + _pm_suggest(m.group(3), f"rename {m.group(1)} to {m.group(2)}")
         except Exception as e:
             return f"ast rename: {e}"
 
@@ -421,7 +421,7 @@ def dispatch(task: str) -> str:
     if m:
         try:
             r = delete_func(m.group(1), m.group(2))
-            return f"ast delete: removed '{m.group(1)}' from {m.group(2)}\n{r['diff']}"
+            return f"ast delete: removed '{m.group(1)}' from {m.group(2)}\n{r['diff']}" + _pm_suggest(m.group(2), f"delete {m.group(1)}")
         except Exception as e:
             return f"ast delete: {e}"
 
@@ -430,7 +430,7 @@ def dispatch(task: str) -> str:
     if m:
         try:
             r = insert_after(m.group(2), m.group(3), m.group(1))
-            return f"ast insert: added code after '{m.group(2)}' in {m.group(3)}\n{r['diff']}"
+            return f"ast insert: added code after '{m.group(2)}' in {m.group(3)}\n{r['diff']}" + _pm_suggest(m.group(3), f"insert code after {m.group(2)}")
         except Exception as e:
             return f"ast insert: {e}"
 
@@ -496,7 +496,7 @@ def dispatch(task: str) -> str:
                 return "ast fix: " + r["error"]
             if not r["changed"]:
                 return f"ast fix: {m.group(1)} already clean (no changes)"
-            return f"ast fix: sorted imports in {m.group(1)}\n{r['diff']}"
+            return f"ast fix: sorted imports in {m.group(1)}\n{r['diff']}" + _pm_suggest(m.group(1), "fix imports with ruff")
         except Exception as e:
             return f"ast fix: {e}"
 
@@ -512,3 +512,11 @@ def dispatch(task: str) -> str:
         "  ast fix FILE\n"
         "  ast format FILE"
     )
+
+
+# ── PM self-write suggestion ──────────────────────────────────────────────
+
+def _pm_suggest(filepath: str, change: str) -> str:
+    """Append a PM suggestion for code changes by swiszard AST transforms."""
+    rel = Path(filepath).name
+    return f"\nPM: code change\n  file: {filepath}\n  change: {change}\n  pm add swiszard {change.replace(chr(32), '-')} in {rel} kind=task state=active title={change} in {rel}"
