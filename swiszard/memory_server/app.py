@@ -847,8 +847,22 @@ def code_search(req: CodeSearchRequest):
 
 
 # ── projects (project-manager substrate) ─────────────────────────────────────
-from swiszproj import server_engine as _pm
-from swiszproj import pm_backup
+_pm = None
+
+def _get_pm():
+    global _pm
+    if _pm is None:
+        import importlib
+        _pm = importlib.import_module('swiszproj').server_engine
+    return _pm
+
+_pmbackup=None
+def _get_pmbackup():
+    global _pmbackup
+    if _pmbackup is None:
+        import importlib
+        _pmbackup = importlib.import_module('swiszproj').pm_backup
+    return _pmbackup
 
 _PM_INIT_DONE = False
 _PM_INIT_LOCK = threading.Lock()
@@ -924,7 +938,7 @@ def pm_add_node(req: PMAddNodeRequest):
     conn = _get_conn()
     pid = _pm.get_or_create_project(conn, req.project)
     try:
-        pm_backup.log_mutation("INSERT", "pm_node", 0,
+        _get_pmbackup().log_mutation("INSERT", "pm_node", 0,
                                new_row={"project": req.project, "kind": req.kind,
                                         "state": req.state, "title": req.title,
                                         "body_preview": req.body[:200]},
@@ -1015,7 +1029,7 @@ class PMTransitionRequest(BaseModel):
 def pm_transition(req: PMTransitionRequest):
     _ensure_pm()
     try:
-        pm_backup.log_mutation("UPDATE", "pm_node", req.node_id,
+        _get_pmbackup().log_mutation("UPDATE", "pm_node", req.node_id,
                                new_row={"state": req.state},
                                metadata={"endpoint": "/project/transition"})
         result = _pm.state_transition(_get_conn(), req.node_id, req.state)
@@ -1053,8 +1067,7 @@ class PMDeleteRequest(BaseModel):
 def pm_delete_node(req: PMDeleteRequest):
     _ensure_pm()
     try:
-        from swiszproj import pm_backup
-        pm_backup.log_mutation("DELETE", "pm_node", req.node_id,
+                _get_pmbackup().log_mutation("DELETE", "pm_node", req.node_id,
                                metadata={"endpoint": "/project/delete_node",
                                          "expected_title": req.expected_title[:80]})
         result = _pm.delete_node(_get_conn(), req.node_id,
@@ -1073,8 +1086,7 @@ class PMReparentRequest(BaseModel):
 def pm_reparent(req: PMReparentRequest):
     _ensure_pm()
     try:
-        from swiszproj import pm_backup
-        pm_backup.log_mutation("UPDATE", "pm_node", req.node_id,
+                _get_pmbackup().log_mutation("UPDATE", "pm_node", req.node_id,
                                new_row={"parent_id": req.new_parent_id},
                                metadata={"endpoint": "/project/reparent"})
         result = _pm.reparent_node(_get_conn(), req.node_id, req.new_parent_id)
@@ -1089,9 +1101,8 @@ def pm_create(req: PMCreateRequest):
     _ensure_pm()
     conn = _get_conn()
     pid, created = _pm.get_or_create_project_dedup(conn, req.name)
-    from swiszproj import pm_backup
-    if created:
-        pm_backup.log_mutation("INSERT", "pm_project", pid,
+        if created:
+        _get_pmbackup().log_mutation("INSERT", "pm_project", pid,
                                new_row={"name": req.name},
                                metadata={"endpoint": "/project/create"})
     return {"id": pid, "name": req.name, "created": created}
