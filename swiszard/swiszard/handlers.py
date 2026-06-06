@@ -763,3 +763,52 @@ import difflib as _ast_difflib
 def handler_ast_transform(task):
     from swiszcode.ast_transform import dispatch
     return dispatch(task)
+
+
+# ── handler_ast_pin ────────────────────────────────────────────────────────────
+# DSL:
+#   ast pin claim NID file:PATH type:TYPE name:NAME  — write an ast_claim to pm_node.tags
+#   ast pin verify NID                               — run pin_verify and return report
+def handler_ast_pin(task: str) -> str:
+    import re, json, sys, os
+    sys.path.insert(0, "/home/ziggibot/theSwiszard/swiszcode")
+    from ast_pin import Claim, write_claim, pin_verify
+
+    t = task.strip()
+    # Strip leading "ast pin " prefix (router already matched)
+    t = re.sub(r"^ast\s+pin\s+", "", t, flags=re.IGNORECASE).strip()
+
+    # --- verify ---
+    m_verify = re.match(r"^verify\s+(\d+)$", t, re.IGNORECASE)
+    if m_verify:
+        node_id = int(m_verify.group(1))
+        result = pin_verify(node_id)
+        stale = not result.get("verified", True)
+        prefix = "[STALE AST PIN] " if stale else ""
+        return prefix + json.dumps(result, separators=(",",":"))
+
+    # --- claim ---
+    m_claim = re.match(
+        r"^claim\s+(\d+)\s+file:(\S+)\s+type:(\S+)\s+name:(\S+)",
+        t, re.IGNORECASE,
+    )
+    if m_claim:
+        node_id   = int(m_claim.group(1))
+        file_path = m_claim.group(2)
+        node_type = m_claim.group(3)
+        node_name = m_claim.group(4)
+        claim = Claim(
+            file=file_path,
+            node_type=node_type,
+            node_name=node_name,
+            pm_node_id=node_id,
+        )
+        result = write_claim(claim)
+        return json.dumps(result, separators=(",",":"))
+
+    return (
+        "handler_ast_pin: unrecognized form. "
+        "Forms: "
+        "ast pin claim NID file:PATH type:TYPE name:NAME | "
+        "ast pin verify NID"
+    )

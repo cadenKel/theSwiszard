@@ -246,12 +246,22 @@ def pin_verify(node_id: int, store: ASTStore | None = None) -> dict:
         claim_data["verified"] = r["verified"]  # carry verification into tag
         tags.append(claim_data)
     
-    write_node_tags(node_id, tags)
-    
+    # Add/remove "stale_pin" string tag based on verification outcome
     all_verified = all(r["verified"] for r in results)
+    non_claim_tags = [t for t in tags if not (isinstance(t, dict) and t.get("claim_type") == "ast_claim")]
+    if not all_verified:
+        if "stale_pin" not in non_claim_tags:
+            non_claim_tags.append("stale_pin")
+    else:
+        non_claim_tags = [t for t in non_claim_tags if t != "stale_pin"]
+    # Rebuild final tag list: non-claim string tags + updated claim dicts
+    final_tags = non_claim_tags + [t for t in tags if isinstance(t, dict) and t.get("claim_type") == "ast_claim"]
+    write_node_tags(node_id, final_tags)
+
     return {
         "node_id": node_id,
         "verified": all_verified,
+        "stale": not all_verified,
         "claims": results,
         "summary": "all verified" if all_verified else f"{sum(1 for r in results if r['verified'])}/{len(results)} verified",
     }

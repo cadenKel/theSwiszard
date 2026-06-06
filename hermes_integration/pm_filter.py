@@ -97,7 +97,25 @@ def project_tree(project: str, show_all: bool = False) -> str:
     if not show_all:
         nodes = _filter_nodes(nodes)
 
-    return json.dumps({"nodes": nodes, "filtered": not show_all, "total": len(nodes)}, default=str)
+    # Warn loudly about stale-pinned nodes
+    stale_nodes = []
+    for n in nodes:
+        raw_tags = n.get("tags", "[]")
+        try:
+            tag_list = json.loads(raw_tags) if isinstance(raw_tags, str) else raw_tags
+        except Exception:
+            tag_list = []
+        if "stale_pin" in tag_list:
+            stale_nodes.append({"id": n.get("id"), "title": n.get("title", "")[:80]})
+
+    result = {"nodes": nodes, "filtered": not show_all, "total": len(nodes)}
+    if stale_nodes:
+        result["STALE_PIN_WARNING"] = (
+            f"{len(stale_nodes)} node(s) have unverified AST pin claims — "
+            "the code they describe no longer matches. Run `ast pin verify NID` to re-check."
+        )
+        result["stale_pinned_nodes"] = stale_nodes
+    return json.dumps(result, default=str)
 
 
 def project_list() -> str:
