@@ -217,7 +217,12 @@ def handle_slash(line: str, *, cfg: Config, mem: MemoryClient, state: AgentState
     if cmd in ("quit", "exit", "q"):
         raise SystemExit(0)
     if cmd == "help":
-        print(__doc__)
+        from . import display as _display
+        wizards = [{"name": n} for n in list_wizards()]
+        if wizards:
+            _display.print_wizard_table(wizards)
+        else:
+            print(__doc__)
         return True
     if cmd == "model":
         if not args:
@@ -952,6 +957,51 @@ def handle_slash(line: str, *, cfg: Config, mem: MemoryClient, state: AgentState
             print(c(f"  load={st.get('load_ms',0)}ms  prompt={pe}tok/{pms}ms ({pe*1000//pms}t/s)  gen={ec}tok/{ems}ms ({ec*1000//ems}t/s)  total={st.get('total_ms',0)}ms", DIM))
         return True
 
+    if cmd == "status":
+        from . import display as _display
+        import sqlite3 as _sqlite3
+        pm_status: dict = {}
+        try:
+            import requests as _req
+            r = _req.post("http://127.0.0.1:8765/project/status",
+                          json={"project": "swiszard"}, timeout=3)
+            if r.ok:
+                pm_status = r.json()
+        except Exception:
+            pass
+        mem_count = 0
+        try:
+            mem_count = len(mem.list_memories(limit=500))
+        except Exception:
+            pass
+        trace_count = 0
+        try:
+            tw = tracelog.get_default()
+            if tw:
+                trace_count = len(tw.recent(n=9999))
+        except Exception:
+            pass
+        _display.print_status_banner(pm_status, mem_count, trace_count)
+        return True
+
+    if cmd == "shapes":
+        from . import display as _display
+        from . import shape_miner as _sm
+        traces_db = cfg.state_dir / "traces.db"
+        candidates = _sm.ShapeMiner(traces_db).expose_candidates(min_count=2)
+        if not candidates:
+            print(c("not enough traces yet", DIM))
+        else:
+            from rich.table import Table
+            table = Table(show_header=True, header_style="dim", box=None, padding=(0,2))
+            table.add_column("sequence", style="cyan")
+            table.add_column("count", style="dim")
+            table.add_column("avg duration", style="dim")
+            for row in candidates:
+                table.add_row(row["sequence"], str(row["count"]), f"{row['avg_duration']:.1f}s")
+            _display.console.print(table)
+        return True
+
     print(c(f"unknown command: /{cmd}", RED))
     return True
 
@@ -1147,54 +1197,57 @@ def main():
     state.last_p0_router_hint = ""
     state.last_p0_chunks_block = ""
 
-    _orig_recall_fn = recall_fn
+    # ---- ContextAssembler wiring (#270) ------------------------------------
+    from .context_assembly import ContextAssembler as _ContextAssembler
+    _assembler = _ContextAssembler(
+        mem_client=mem,
+        embed_fn=_embed,
+        p0_store=_p0_store,
+        session_id=session_id,
+        pm_project="swiszard",
+    )
+
+    _base_recall_fn = recall_fn
     def recall_fn(query):
         _stats_incr("turns")
-        # flush any sequence accumulated during the previous turn BEFORE updating user_text
         try:
             if getattr(state, "_flush_sequence", None):
                 state._flush_sequence()
         except Exception:
             pass
         state.last_user_input = query
-        mems = _orig_recall_fn(query)
-        # also recall chunks from swiszContext
+        # Run ContextAssembler (parallel: mems + PM nodes + ctx chunks + anticipated)
+        traj = getattr(state, "_traj", None)
         try:
-            _qvec = _embed(query) if query and query.strip() else None
-            # P1.15: blend task fingerprint into query vector
-            try:
-                _fp = getattr(state, "_fp", None)
-                if _qvec is not None and _fp is not None and not _fp.is_empty():
-                    _fp_text = _fp.render()
-                    if _fp_text.strip():
-                        _fp_vec = _embed(_fp_text)
-                        _qvec = _fp_blend(_qvec, _fp_vec)
-            except Exception:
-                pass
-            if _qvec is not None:
-                hits = _p0_store.recall_chunks(_qvec, top_k=5, session_id=session_id, min_score=0.55)
-                state.last_p0_chunks_block = _render_chunks(hits)
-                if hits:
-                    _top = hits[0]["score"]
-                    print(c(f"  ctx▸ {len(hits)} swiszContext chunks (top score {_top:.2f})", DIM))
-            else:
-                state.last_p0_chunks_block = ""
-        except _EmbedError as _e:
-            state.last_p0_chunks_block = ""
-            print(c(f"  ctx▸ embed failed: {_e}", YELLOW))
-        except Exception as _e:
-            state.last_p0_chunks_block = ""
-            print(c(f"  ctx▸ recall failed: {_e}", YELLOW))
-        # also compute a router hint for this turn
+            _result = _assembler.assemble(query, traj=traj)
+        except Exception as _ae:
+            print(c(f"  assembler failed: {_ae}", YELLOW))
+            return _base_recall_fn(query)
+        # surface errors from individual sources
+        for err in _result.errors:
+            print(c(f"  ctx▸ {err}", YELLOW))
+        # preserve side-effects the rest of cli.py depends on
+        state.resurfaced_memories = _result.pinned + _result.memories
+        state.last_code_hits = _result.code_hits
+        state.last_p0_chunks_block = _result.render()
+        state.last_p0_router_hint = ""
+        # router hint (kept separate for backwards compat)
         try:
             _decision = _p0_router.decide(query)
             state.last_p0_router_hint = _router_hint(_decision)
             if _decision.mode != "fallback":
                 print(c(f"  hint▸ {_decision.mode}: wizard={_decision.wizard_name} score={_decision.score:.2f}", DIM))
-        except Exception as _e:
-            state.last_p0_router_hint = ""
-            print(c(f"  hint▸ router failed: {_e}", YELLOW))
-        return mems
+        except Exception as _he:
+            print(c(f"  hint▸ router failed: {_he}", YELLOW))
+        # banners
+        if _result.memories or _result.pinned:
+            render_recall_banner(_result.pinned + _result.memories)
+        if _result.pm_nodes:
+            print(c(f"  pm▸ {len(_result.pm_nodes)} nodes injected", DIM))
+        if _result.ctx_chunks:
+            _top = _result.ctx_chunks[0].get("score", 0)
+            print(c(f"  ctx▸ {len(_result.ctx_chunks)} swiszContext chunks (top score {_top:.2f})", DIM))
+        return _result.pinned + _result.memories
 
     _orig_renderer = combined_renderer
     def combined_renderer(mems):
@@ -1211,7 +1264,7 @@ def main():
         if base:
             return base + chr(10) + chr(10) + chr(10).join(extras)
         return chr(10).join(extras)
-    # ---- end P0 wiring -----------------------------------------------------
+    # ---- end P0/assembler wiring -------------------------------------------
     # ---- Scratchpad reasoning (jarvis option B, 2026-06-01) ----------------
     _sp_store = _SPStore(db_path=cfg.state_dir / "scratchpad.db")
     _sp_ops = _SPOps(_sp_store, session_id)
