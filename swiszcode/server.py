@@ -475,3 +475,43 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def ast3d(argv=None):
+    """ast3d <file.py|dir> [--port N] — launch 3D AST viewer for a file or repo.
+
+    Starts the HTTP server in a background thread, opens the browser, blocks
+    until Ctrl-C.
+    """
+    import argparse, threading, time, webbrowser
+    p = argparse.ArgumentParser(description="ast3d — 3D AST viewer")
+    p.add_argument("target", nargs="?", default=".", help="file.py or directory")
+    p.add_argument("--port", type=int, default=8910)
+    p.add_argument("--host", default="127.0.0.1")
+    args = p.parse_args(argv)
+
+    target = Path(args.target).resolve()
+    if target.is_file():
+        # single-file mode: serve the directory, open viewer with file pre-selected
+        Handler.root_dir = str(target.parent)
+        url = f"http://{args.host}:{args.port}/viewer.html?file={target.name}"
+        print(f"  analyzing {target}...")
+        analyze_repo(str(target.parent))
+    else:
+        Handler.root_dir = str(target)
+        url = f"http://{args.host}:{args.port}"
+        print(f"  analyzing {target}...")
+        analyze_repo(str(target))
+
+    srv = http.server.HTTPServer((args.host, args.port), Handler)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    print(f"  ast3d → {url}")
+    time.sleep(0.3)
+    webbrowser.open(url)
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\ndone")
+        srv.server_close()

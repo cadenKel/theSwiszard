@@ -13,6 +13,8 @@ dependencies = [
 
 [project.scripts]
 swiszcode = "server:main"
+ast3d = "server:ast3d"
+swiszcode-pipeline = "pipeline:main"
 
 [tool.setuptools.packages.find]
 include = ["*.py"]

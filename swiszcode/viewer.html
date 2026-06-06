@@ -18,9 +18,20 @@
   .imports{color:#88CC88;font-size:11px}
   #help{position:fixed;bottom:56px;left:16px;color:#888;font-size:11px;background:rgba(10,10,30,0.7);padding:6px 10px;border-radius:4px}
   .label{color:#fff;font-size:10px;pointer-events:none;text-shadow:0 0 4px rgba(0,0,0,0.8);text-align:center}
+  /* highlight.js overrides for dark theme */
+  .hljs{background:transparent!important;color:#abb2bf;font-size:11px}
+  /* node search */
+  #search-bar{position:fixed;top:16px;left:16px;display:flex;gap:6px;z-index:9999}
+  #search-bar input{background:rgba(10,10,30,0.9);border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#ddd;padding:4px 8px;font-family:inherit;font-size:12px;width:200px;outline:none}
+  #search-bar input::placeholder{color:#666}
+  #search-bar button{background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);color:#aaa;border-radius:4px;padding:4px 8px;cursor:pointer;font-size:12px}
 </style>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
 </head>
 <body>
+<div id="search-bar"><input id="search-input" type="text" placeholder="filter nodes…" /><button id="search-clear">✕</button></div>
 <div id="help">drag: orbit | scroll: zoom | right-drag: pan | click: info | R:	reset F:	front T:	top | Esc: close</div>
 <div id="info"><span>file: <strong id="fname">&mdash;</strong></span><span>nodes: <strong id="ncount">0</strong></span><span>edges: <strong id="ecount">0</strong></span><span>sel: <strong id="sname">&mdash;</strong></span></div>
 <div id="panel"><h3></h3><span class="role"></span><div class="funcs"></div><div class="classes"></div><div class="imports"></div></div>
@@ -173,7 +184,7 @@ addEventListener("click",ev => {
     sn.textContent = ud.name;
 
     if (isFile) {
-      panel.innerHTML = "<h3>" + esc(ud.name) + "</h3><span class='role' style='background:"+ud.color+"33;color:"+ud.color+";border:1px solid "+ud.color+"55'>"+ud.type+"</span>" + (ud.code ? "<pre style='margin-top:8px;color:#aaa;white-space:pre-wrap;max-height:50vh;overflow-y:auto'>" + esc(ud.code) + "</pre>" : "");
+      panel.innerHTML = "<h3>" + esc(ud.name) + "</h3><span class='role' style='background:"+ud.color+"33;color:"+ud.color+";border:1px solid "+ud.color+"55'>"+ud.type+"</span>" + (ud.code ? "<pre style='margin-top:8px'><code class='language-python' id='code-block'>" + esc(ud.code) + "</code></pre>" : "");
     } else {
       const funcs = (ud.functions || []).slice(0,10).join(", ") + ((ud.functions || []).length > 10 ? "…" : "");
       const cls = (ud.classes || []).slice(0,8).join(", ") + ((ud.classes || []).length > 8 ? "…" : "");
@@ -211,6 +222,47 @@ addEventListener("resize",() => {
   lr.setSize(innerWidth,innerHeight);
 });
 
+</script>
+<script>
+  // ---- highlight.js activation ----
+  const _origShow = panel.style.__proto__ || Object.getPrototypeOf(panel.style);
+  function applyHighlight(){
+    const cb = document.getElementById("code-block");
+    if(cb && typeof hljs !== "undefined"){ hljs.highlightElement(cb); }
+  }
+  // hook: call after each panel update
+  const _panelObserver = new MutationObserver(applyHighlight);
+  _panelObserver.observe(panel, {childList:true, subtree:true});
+
+  // ---- node search/filter ----
+  const searchInput = document.getElementById("search-input");
+  const searchClear = document.getElementById("search-clear");
+  let _filterText = "";
+
+  function applyFilter(){
+    _filterText = searchInput.value.toLowerCase().trim();
+    if(typeof spriteGroup !== "undefined"){
+      spriteGroup.children.forEach(sp => {
+        if(!_filterText){ sp.material.opacity = 1.0; return; }
+        const lbl = (sp.userData && sp.userData.name || "").toLowerCase();
+        sp.material.opacity = lbl.includes(_filterText) ? 1.0 : 0.15;
+      });
+    }
+    if(typeof nodeGroup !== "undefined"){
+      nodeGroup.children.forEach(nd => {
+        if(!_filterText){ nd.material.opacity = 1.0; return; }
+        const lbl = (nd.userData && nd.userData.name || "").toLowerCase();
+        nd.material.opacity = lbl.includes(_filterText) ? 1.0 : 0.1;
+      });
+    }
+  }
+
+  searchInput.addEventListener("input", applyFilter);
+  searchClear.addEventListener("click", ()=>{ searchInput.value=""; applyFilter(); });
+  document.addEventListener("keydown", e=>{
+    if(e.key==="Escape"){ searchInput.value=""; applyFilter(); }
+    if(e.key==="/" && document.activeElement!==searchInput){ e.preventDefault(); searchInput.focus(); }
+  });
 </script>
 </body>
 </html>
