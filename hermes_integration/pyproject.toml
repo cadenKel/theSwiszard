@@ -1,0 +1,14 @@
+[build-system]
+requires=["setuptools>=67"]
+build-backend="setuptools.backends.legacy:build"
+
+[project]
+name="hermes-integration"
+version="0.1.0"
+description="Hermes MCP integration for the swiszard"
+requires-python=">=3.11"
+dependencies=[]
+
+[project.scripts]
+hermes-mcp-server = "hermes_integration.server:main"
+hermes-mcp-http = "hermes_integration.http_server:main"
