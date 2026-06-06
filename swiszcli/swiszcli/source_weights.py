@@ -69,9 +69,18 @@ def reset_cache():
 
 
 def weight_for(source) -> float:
+    """Look up source weight. Checks WeightEngine first, then static _table()."""
     if not source:
         return UNKNOWN_DEFAULT
     s = str(source).strip()
+    try:
+        from .weight_engine import get_engine as _get_eng
+        _eng = _get_eng()
+        _w = _eng.source_weight(s)
+        if _w != _eng.default_weight:
+            return _w
+    except Exception:
+        pass
     t = _table()
     if s in t:
         return t[s]

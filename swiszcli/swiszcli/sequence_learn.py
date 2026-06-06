@@ -103,6 +103,13 @@ class SequenceStore:
             (time.time(), sid),
         )
         self._conn.commit()
+        # Delegate to WeightEngine for unified cross-signal compositing
+        try:
+            from .weight_engine import get_engine as _get_eng
+            _get_eng().observe_seq(sid, 1.0 if win else 0.0)
+            _get_eng().save()
+        except Exception:
+            pass  # WeightEngine is additive; never break sequence_learn
 
     def count(self):
         return self._conn.execute('SELECT COUNT(*) c FROM sequences').fetchone()['c']

@@ -1206,6 +1206,13 @@ def main():
         session_id=session_id,
         pm_project="swiszard",
     )
+    # WeightEngine: cross-signal compositing (#311)
+    try:
+        from .weight_engine import get_engine as _get_weng
+        _weng = _get_weng()
+    except Exception as _we:
+        _weng = None
+        print(c(f"  weng: init failed: {_we}", YELLOW))
 
     _base_recall_fn = recall_fn
     def recall_fn(query):
@@ -1239,6 +1246,19 @@ def main():
                 print(c(f"  hint▸ {_decision.mode}: wizard={_decision.wizard_name} score={_decision.score:.2f}", DIM))
         except Exception as _he:
             print(c(f"  hint▸ router failed: {_he}", YELLOW))
+        # WeightEngine cross-signal edge re-ranking (#311)
+        if _weng is not None:
+            try:
+                _prev_wiz = getattr(state, 'last_wizard', None)
+                _curr_wiz = getattr(state, 'current_wizard', None)
+                if _prev_wiz and _curr_wiz and _prev_wiz != _curr_wiz:
+                    _ew = _weng.edge_weight(_prev_wiz, _curr_wiz)
+                    for _m in _result.memories:
+                        if isinstance(_m, dict) and 'score' in _m:
+                            _m['score'] = _m['score'] * _ew
+            except Exception:
+                pass
+
         # banners
         if _result.memories or _result.pinned:
             render_recall_banner(_result.pinned + _result.memories)

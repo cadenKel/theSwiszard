@@ -64,30 +64,38 @@ def _save_edges(d: dict[str, float]) -> None:
 
 
 def get_edge_weight(from_wizard: str, to_wizard: str) -> float:
-    key = f"{from_wizard}->{to_wizard}"
-    edges = _load_edges()
-    return edges.get(key, 0.5)
+    """Delegates to WeightEngine; falls back to legacy file if engine unseen."""
+    from .weight_engine import get_engine
+    eng = get_engine()
+    w = eng.edge_weight(from_wizard, to_wizard)
+    if w == eng.default_weight:
+        # seed from legacy file on first access
+        edges = _load_edges()
+        legacy_key = f"{from_wizard}->{to_wizard}"
+        if legacy_key in edges:
+            eng.set(f"edge:{from_wizard}:{to_wizard}", edges[legacy_key])
+            eng.save()
+            return edges[legacy_key]
+    return w
 
 
 def record_edge_correct(from_wizard: str, to_wizard: str) -> float:
-    key = f"{from_wizard}->{to_wizard}"
-    edges = _load_edges()
-    current = edges.get(key, 0.5)
+    from .weight_engine import get_engine
+    eng = get_engine()
+    current = eng.edge_weight(from_wizard, to_wizard)
     target = min(W_MAX, current + 0.25)
-    new_w = current + EMA_ALPHA * (target - current)
-    edges[key] = round(new_w, 4)
-    _save_edges(edges)
+    new_w = eng.observe(f"edge:{from_wizard}:{to_wizard}", target)
+    eng.save()
     return new_w
 
 
 def record_edge_incorrect(from_wizard: str, to_wizard: str) -> float:
-    key = f"{from_wizard}->{to_wizard}"
-    edges = _load_edges()
-    current = edges.get(key, 0.5)
+    from .weight_engine import get_engine
+    eng = get_engine()
+    current = eng.edge_weight(from_wizard, to_wizard)
     target = max(W_MIN, current - 0.25)
-    new_w = current + EMA_ALPHA * (target - current)
-    edges[key] = round(new_w, 4)
-    _save_edges(edges)
+    new_w = eng.observe(f"edge:{from_wizard}:{to_wizard}", target)
+    eng.save()
     return new_w
 
 
