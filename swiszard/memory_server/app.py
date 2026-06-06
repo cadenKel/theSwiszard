@@ -1185,3 +1185,15 @@ def pm_health_endpoint():
         }
     }
 
+
+
+@app.get('/router/match')
+def router_match(task: str, dry_run: bool = True):
+    from swiszard.router import swiszard_do as _route
+    if not task or not task.strip():
+        raise HTTPException(status_code=400, detail='task required')
+    result = _route(task.strip(), dry_run=True)
+    handler = None
+    if '[dry-run] would route to:' in result:
+        handler = result.split('would route to:',1)[1].strip()
+    return {'task': task, 'handler': handler, 'raw': result}

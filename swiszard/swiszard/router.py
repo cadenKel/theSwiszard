@@ -323,11 +323,14 @@ def swiszard_do(task: str, dry_run: bool = False) -> str:
                 result.startswith("handler_file_find: could not") or
                 result.startswith("handler_shell: command timed") or
                 result.startswith("handler_shell: invalid") or
-                result.startswith("handler_web_search:") or
-                result.startswith("handler_file_write:") or
-                result.startswith("handler_edit:") or
-                result.startswith("handler_skill:") or
-                result.startswith("handler_ast_transform:") or
+                result.startswith("handler_web_search: error") or
+                result.startswith("handler_file_write: error") or
+                result.startswith("handler_file_write: could not") or
+                result.startswith("handler_edit: error") or
+                result.startswith("handler_edit: could not") or
+                result.startswith("handler_skill: error") or
+                result.startswith("handler_ast_transform: error") or
+                result.startswith("handler_ast_transform: could not") or
                 result.startswith("memory recall failed:") or
                 result.startswith("memory remember failed:") or
                 result.startswith("memory forget failed:")
@@ -365,7 +368,18 @@ def swiszard_do(task: str, dry_run: bool = False) -> str:
                 return f"[dry-run] would route to: {best['handler']}"
             result = HANDLER_MAP[best["handler"]](task)
             try:
-                is_err = isinstance(result, str) and result.startswith("handler_")
+                is_err = isinstance(result, str) and (
+                result.startswith("handler_shell: command timed") or
+                result.startswith("handler_shell: invalid") or
+                result.startswith("handler_web_search: error") or
+                result.startswith("handler_file_write: error") or
+                result.startswith("handler_file_write: could not") or
+                result.startswith("handler_edit: error") or
+                result.startswith("handler_edit: could not") or
+                result.startswith("handler_skill: error") or
+                result.startswith("handler_ast_transform: error") or
+                result.startswith("handler_ast_transform: could not")
+            )
                 swiszard_feedback(task, best["handler"], not is_err)
             except Exception:
                 pass
