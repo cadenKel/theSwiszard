@@ -353,118 +353,7 @@ _RE_FIX = re.compile(r'^ast\s+fix\s+(\S+)\s*$')
 _RE_RENAME_REPO = re.compile(r'^ast\s+rename\s+(\S+)\s+to\s+(\S+)\s+in\s+(\S+)\s*$')
 _RE_VERIFY = re.compile(r'^ast\s+verify\s+(\S+)\s*$')
 _RE_UNDO = re.compile(r'^ast\s+undo\s+last\s+in\s+(\S+)\s*$')
-_RE_BATCH = re.compile(r'^ast\s+batch\s+(\S+)\s*::\s*(.+)$', re.DOTALL)
 
-
-
-
-def _parse_batch_op(op: str, filepath: str):
-    """Parse an abbreviated batch sub-op into (func, args) tuple.
-
-    Calls underlying functions directly to avoid string-matching heuristics.
-    Returns (callable, kwargs) or raises ValueError for unrecognized ops.
-
-    Supported forms (FILE is always injected as filepath):
-      rename OLD to NEW     -> rename(old, new, filepath)
-      delete NAME           -> delete_func(name, filepath)
-      wrap NAME             -> wrap(name, filepath)
-      decorate NAME with @D -> decorate(name, filepath, decorator)
-      insert B64 after NAME -> insert_after(name, filepath, b64)
-      format                -> format_file(filepath)
-      find NAME             -> find(name, filepath)  [read-only, no-op on error OK]
-      lint                  -> calls dispatch("ast lint filepath")
-      verify                -> calls dispatch("ast verify filepath")
-      fix                   -> calls dispatch("ast fix filepath")
-    """
-    import re as _re
-    op = op.strip()
-    if not op:
-        return None, None
-
-    # rename OLD to NEW
-    m = _re.match(r'rename\s+(\S+)\s+to\s+(\S+)$', op)
-    if m:
-        return rename, {"old_name": m.group(1), "new_name": m.group(2), "filepath": filepath}
-
-    # delete NAME
-    m = _re.match(r'delete\s+(\S+)$', op)
-    if m:
-        return delete_func, {"func_name": m.group(1), "filepath": filepath}
-
-    # wrap NAME
-    m = _re.match(r'wrap\s+(\S+)$', op)
-    if m:
-        return wrap, {"func_name": m.group(1), "filepath": filepath}
-
-    # decorate NAME with @DEC
-    m = _re.match(r'decorate\s+(\S+)\s+with\s+@?(\S+(?:\s*\([^)]*\))?)', op)
-    if m:
-        return decorate, {"func_name": m.group(1), "filepath": filepath, "decorator": m.group(2)}
-
-    # insert B64 after NAME
-    m = _re.match(r'insert\s+(\S+)\s+after\s+(\S+)$', op)
-    if m:
-        return insert_after, {"target_name": m.group(2), "filepath": filepath, "code_b64": m.group(1)}
-
-    # format
-    if op in ("format",):
-        return format_file, {"filepath": filepath}
-
-    # find NAME (read-only — include so batch can query mid-chain; result appended to diff)
-    m = _re.match(r'find\s+(\S+)$', op)
-    if m:
-        return find, {"func_name": m.group(1), "filepath": filepath}
-
-    # pass-through for lint/verify/fix/full-form "ast ..." commands
-    if op.startswith("ast ") or op in ("lint", "verify", "fix"):
-        full = op if op.startswith("ast ") else f"ast {op} {filepath}"
-        # wrap in a callable that calls dispatch
-        def _dispatch_op(full=full):
-            return dispatch(full)
-        return _dispatch_op, {}
-
-    raise ValueError(f"unrecognized batch op: {op!r}")
-
-
-def batch_transforms(filepath: str, ops: list) -> dict:
-    """Apply multiple transforms to filepath sequentially.
-
-    Each op is an abbreviated DSL string (FILE auto-injected).
-    Calls underlying functions directly — no string-matching heuristics.
-    On any failure, restores file from pre-batch snapshot.
-    Returns {"ok": True, "ops": N, "diff": str, "changed": bool}
-    """
-    import shutil as _shutil
-
-    p = Path(filepath)
-    if not p.exists():
-        raise FileNotFoundError(f"file not found: {filepath}")
-
-    original = p.read_text()
-    bak = Path(str(p) + ".batch.bak")
-    _shutil.copy2(filepath, str(bak))
-
-    applied = 0
-    try:
-        for i, op in enumerate(ops):
-            func, kwargs = _parse_batch_op(op, filepath)
-            if func is None:
-                continue
-            func(**kwargs)   # raises on failure — exception is the signal
-            applied += 1
-    except Exception as exc:
-        _shutil.copy2(str(bak), filepath)
-        bak.unlink(missing_ok=True)
-        raise RuntimeError(f"batch reverted at step {applied + 1} ({ops[applied]!r}): {exc}") from exc
-
-    bak.unlink(missing_ok=True)
-    final = p.read_text()
-    diff = "".join(difflib.unified_diff(
-        original.splitlines(keepends=True),
-        final.splitlines(keepends=True),
-        fromfile=filepath, tofile=filepath, n=3,
-    ))
-    return {"ok": True, "ops": applied, "diff": diff, "changed": original != final}
 
 def dispatch(task: str) -> str:
     """Route a DSL task string to the appropriate transform.
@@ -611,25 +500,6 @@ def dispatch(task: str) -> str:
         except Exception as e:
             return f"ast fix: {e}"
 
-
-    # ast batch
-    m = _RE_BATCH.match(task)
-    if m:
-        filepath = m.group(1)
-        raw_ops = [s.strip() for s in m.group(2).split("::")]
-        raw_ops = [op for op in raw_ops if op.strip()]
-        try:
-            r = batch_transforms(filepath, raw_ops)
-            if not r["changed"]:
-                return f"ast batch: {r['ops']} ops, no changes to {filepath}"
-            return (
-                f"ast batch: {r['ops']} ops applied to {filepath}\n"
-                + r["diff"]
-                + _pm_suggest(filepath, f"batch {len(raw_ops)} transforms")
-            )
-        except Exception as e:
-            return f"ast batch: {e}"
-
     return (
         "ast_transform: unrecognized operation. Forms:\n"
         "  ast find FUNC in FILE\n"
@@ -640,8 +510,7 @@ def dispatch(task: str) -> str:
         "  ast insert B64 after NAME in FILE\n"
         "  ast lint FILE\n"
         "  ast fix FILE\n"
-        "  ast format FILE\n"
-        "  ast batch FILE :: op1 :: op2  (ops: rename/delete/wrap/decorate/insert/format/find/fix/lint/verify)"
+        "  ast format FILE"
     )
 
 

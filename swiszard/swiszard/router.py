@@ -33,6 +33,7 @@ from .db import (
     insert_example,
     increment_success,
     increment_fail,
+    record_gap,
 )
 from .embeddings import embed, embed_to_blob, blob_to_array, cosine_similarity
 from .seeds import SEED_EXAMPLES
@@ -434,6 +435,10 @@ def swiszard_do(task: str, dry_run: bool = False) -> str:
             narrate(
                 f"no confident match (best sim={best['sim']:.3f}); returning no-match"
             )
+            try:
+                record_gap(task, best["handler"], best["sim"])
+            except Exception:
+                pass
             return (
                 f"swiszard: no confident handler match. best guess: {best['handler']} "
                 f"(sim {best['sim']:.3f}, threshold {ROUTE_THRESHOLD}). "

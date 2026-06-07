@@ -503,9 +503,9 @@ KIND_STATES = {
 VALID_TRANSITIONS = {
     # objective
     "proposed":   {"active", "abandoned"},
-    "active":     {"satisfied", "abandoned"},
+    "active":     {"satisfied", "abandoned", "done", "blocked"},
     "satisfied":  set(),
-    "abandoned":  set(),
+    "abandoned":  {"active"},  # reopen: accident recovery only
     # task
     "blocked":    {"active", "abandoned"},
     "done":       set(),

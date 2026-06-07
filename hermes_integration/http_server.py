@@ -19,7 +19,7 @@ if str(_REPO_ROOT) not in sys.path:
 # Import the same mcp object with all tools registered
 from hermes_integration.server import mcp
 
-if __name__ == "__main__":
+def main() -> None:
     import argparse
     parser = argparse.ArgumentParser(description="Swiszard MCP HTTP server")
     parser.add_argument("--port", type=int, default=8743)
@@ -30,3 +30,7 @@ if __name__ == "__main__":
     mcp.settings.port = args.port
     print(f"Swiszard MCP HTTP server starting on {args.host}:{args.port}")
     mcp.run(transport="streamable-http")
+
+
+if __name__ == "__main__":
+    main()

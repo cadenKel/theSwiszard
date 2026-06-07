@@ -39,6 +39,38 @@ def init_db() -> None:
                 created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS gaps (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                phrasing     TEXT NOT NULL,
+                best_guess   TEXT NOT NULL,
+                sim          REAL NOT NULL,
+                resolved     INTEGER DEFAULT 0,
+                resolved_handler TEXT,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+
+
+def record_gap(phrasing: str, best_guess: str, sim: float) -> int:
+    """Log a no-match gap for later resolution. Returns new row id."""
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO gaps (phrasing, best_guess, sim) VALUES (?,?,?)",
+            (phrasing, best_guess, round(sim, 4)),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def resolve_gap(gap_id: int, handler: str) -> None:
+    """Mark a gap resolved once the LLM or user confirms the correct handler."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE gaps SET resolved=1, resolved_handler=? WHERE id=?",
+            (handler, gap_id),
+        )
         conn.commit()
 
 
