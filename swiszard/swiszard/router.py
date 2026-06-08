@@ -48,6 +48,8 @@ from .handlers import (
     handler_skill,
     handler_ast_transform,
     handler_ast_pin,
+    handler_session,
+    handler_proj,
 )
 
 # ── constants ─────────────────────────────────────────────────────────────────
@@ -72,6 +74,8 @@ HANDLER_MAP: dict[str, callable] = {
     "handler_skill": handler_skill,
     "handler_ast_transform": handler_ast_transform,
     "handler_ast_pin": handler_ast_pin,
+    "handler_session": handler_session,
+    "handler_proj": handler_proj,
 }
 
 HELP_TEXT = (
@@ -104,6 +108,15 @@ HELP_TEXT = (
     "  ast pin verify NID                           — verify claims on PM node\n"
     "\nSPECIAL\n"
     "  help | route: T | json: T | safety: T | chain: a | b\n"
+    "\nPROJECT (PM)\n"
+    "  project list\n"
+    "  project status NAME\n"
+    "  project tree NAME\n"
+    "  project node NID\n"
+    "  project transition NID STATE\n"
+    "  project inject QUERY [project:NAME]\n"
+    "  project conflicts [NAME]\n"
+    "  project add NAME body:BODY [kind:K state:S parent:NID title:T]\n"
 )
 
 # ── rule-based routing (fast path) ───────────────────────────────────────────
@@ -118,12 +131,12 @@ def _route_by_rules(task: str) -> str | None:
     # backtick shell form requires explicit leading run keyword (was: any backtick anywhere)
     if re.match(r"^\s*run\s+\u0060", task) and _BACKTICK_RE.search(task):
         return "handler_shell"
-    if re.match(r"^\s*run\s*:\s", task) or re.match(r"^\s*run_b64\s+\S", task):
+    if re.match(r"^\s*run\s*:\s", task) or re.match(r"^\s*run_b64\s+\S", task) or re.match(r"^\s*shell\s*:\s", task):
         return "handler_shell"
     # Memory verbs at start ONLY. Bare 'memory' anywhere must NOT match
     # (paths like /.hermes/memories/MEMORY.md hijack read /path otherwise).
     if re.match(
-        r"^(?:memory\s+)?(recall|remember|forget|deprecate|supersede|list|tag|untag|"
+        r"^(?:memory\s+)?(recall_brief|recall|remember|forget|deprecate|supersede|list|tag|untag|"
         r"pin|unpin|show|status)(?:\s|\+|$)",
         lower,
     ):
@@ -136,6 +149,10 @@ def _route_by_rules(task: str) -> str | None:
         return "handler_skill"
     if re.match(r"^ast\s+pin\s+", lower):
         return "handler_ast_pin"
+    if re.match(r"^session\s+", lower):
+        return "handler_session"
+    if re.match(r"^project\s+", lower):
+        return "handler_proj"
     if re.match(r"^ast\s+", lower):
         return "handler_ast_transform"
     if re.match(r"^write_b64\s+/", lower):
@@ -299,6 +316,14 @@ def swiszard_do(task: str, dry_run: bool = False) -> str:
         Result string from the chosen handler.
     """
     t0 = time.monotonic()
+
+    # ── verbose bypass ────────────────────────────────────────────────────────
+    # Prefix task with "verbose: " to skip the 400-char output cap.
+    _verbose = False
+    if task and task.lstrip().lower().startswith("verbose:"):
+        _verbose = True
+        task = task.lstrip()[len("verbose:"):].lstrip()
+
     narrate(f"received task: {task[:80]}")
 
     if not task or not task.strip():
@@ -309,6 +334,12 @@ def swiszard_do(task: str, dry_run: bool = False) -> str:
 
     # ── ensure DB seeded ──────────────────────────────────────────────────────
     _ensure_seeded()
+
+    def _cap(s: str) -> str:
+        """Cap output to 400 chars unless verbose: was set. Never caps errors or dry-run."""
+        if _verbose or len(s) <= 400:
+            return s
+        return s[:400] + f"\n…({len(s)-400} chars truncated — prefix task with 'verbose: ' to see all)"
 
     # ── rule-based routing (fast path) ───────────────────────────────────────
     rule_handler = _route_by_rules(task)
@@ -339,7 +370,7 @@ def swiszard_do(task: str, dry_run: bool = False) -> str:
             swiszard_feedback(task, rule_handler, not is_err)
         except Exception:
             pass
-        return result
+        return _cap(result)
 
     # Load examples once for TF-IDF and embeddings
     rows = _load_examples()
@@ -379,12 +410,13 @@ def swiszard_do(task: str, dry_run: bool = False) -> str:
                 result.startswith("handler_edit: could not") or
                 result.startswith("handler_skill: error") or
                 result.startswith("handler_ast_transform: error") or
-                result.startswith("handler_ast_transform: could not")
+                result.startswith("handler_ast_transform: could not") or
+                result.startswith("handler_proj: unrecognized")
             )
                 swiszard_feedback(task, best["handler"], not is_err)
             except Exception:
                 pass
-            return result
+            return _cap(result)
 
     # ── embed (fallback) ─────────────────────────────────────────────────────
     t_embed = time.monotonic()
@@ -503,7 +535,7 @@ def swiszard_do(task: str, dry_run: bool = False) -> str:
 
     total_ms = int((time.monotonic() - t0) * 1000)
     narrate(f"completed in {total_ms}ms, returning {len(result)} chars")
-    return result
+    return _cap(result)
 
 
 # ── feedback hook ─────────────────────────────────────────────────────────────

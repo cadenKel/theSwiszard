@@ -13,10 +13,16 @@ Usage:
     traj.add(embed(user_text))
     next_point = traj.predict_next()   # vector or None
     if next_point is not None: ...
+
+Persistence:
+    traj.save(path)   # write to JSON file
+    Trajectory.load(path)  # restore from file (returns new instance)
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 
@@ -67,3 +73,34 @@ class Trajectory:
     def reset(self):
         self.points.clear()
         self._drift = None
+
+    # ── cross-session persistence ────────────────────────────────────────────
+
+    def save(self, path) -> None:
+        """Persist points + drift to JSON. Atomic write via temp file."""
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "window": self.window,
+            "drift_alpha": self.drift_alpha,
+            "points": self.points,
+            "_drift": self._drift,
+        }
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data))
+        tmp.replace(p)
+
+    @classmethod
+    def load(cls, path) -> "Trajectory":
+        """Restore from JSON file. Returns a fresh Trajectory on any error."""
+        try:
+            data = json.loads(Path(path).read_text())
+            t = cls(
+                window=data.get("window", 8),
+                drift_alpha=data.get("drift_alpha", 0.6),
+                points=data.get("points", []),
+            )
+            t._drift = data.get("_drift")
+            return t
+        except Exception:
+            return cls()

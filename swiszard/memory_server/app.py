@@ -1014,14 +1014,77 @@ class PMTransitionRequest(BaseModel):
 @app.post("/project/transition")
 def pm_transition(req: PMTransitionRequest):
     _ensure_pm()
+    conn = _get_conn()
+    # Pre-fetch node so we can return valid_next on bad transitions without HTTP 400.
+    # HTTP 400 trips Hermes circuit breaker even when the server is healthy.
+    node = _pm.get_node(conn, req.node_id)
+    if not node:
+        return {"ok": False, "error": f"node {req.node_id} not found", "valid_next": []}
+    old_state = node["state"]
+    valid_next = sorted(_pm.VALID_TRANSITIONS.get(old_state, set()))
+    if req.state not in (valid_next if valid_next else []):
+        return {"ok": False, "error": f"invalid transition {old_state} -> {req.state}", "valid_next": valid_next}
     try:
         pm_backup.log_mutation("UPDATE", "pm_node", req.node_id,
                                new_row={"state": req.state},
                                metadata={"endpoint": "/project/transition"})
-        result = _pm.state_transition(_get_conn(), req.node_id, req.state)
-        return result
+        result = _pm.state_transition(conn, req.node_id, req.state)
+        return {**result, "ok": True}
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        return {"ok": False, "error": str(e), "valid_next": valid_next}
+
+
+
+# ── single node fetch ─────────────────────────────────────────────────────
+
+@app.get("/project/node")
+def pm_get_node(node_id: int):
+    """Fetch a single node by id. Returns full row or 404."""
+    _ensure_pm()
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT id, project_id, parent_id, kind, state, title, body, created, updated, "
+        "COALESCE(tags, \'[]\') as tags FROM pm_node WHERE id=?",
+        (node_id,)
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, f"node {node_id} not found")
+    return dict(row)
+
+
+# ── subtree fetch ─────────────────────────────────────────────────────────
+
+class PMSubtreeRequest(BaseModel):
+    root_id: int
+    show_all: bool = True
+
+
+@app.post("/project/subtree")
+def pm_subtree(req: PMSubtreeRequest):
+    """Return all descendants of root_id as a flat list (root included)."""
+    _ensure_pm()
+    conn = _get_conn()
+    root = _pm.get_node(conn, req.root_id)
+    if not root:
+        raise HTTPException(404, f"node {req.root_id} not found")
+    # Get project_id from root node, fetch all project nodes, walk subtree
+    project_id = root["project_id"]
+    all_nodes = _pm.project_tree(conn, project_id)
+    by_parent: dict = {}
+    node_map: dict = {}
+    for n in all_nodes:
+        node_map[n["id"]] = n
+        by_parent.setdefault(n.get("parent_id"), []).append(n)
+
+    result = []
+    def _walk(nid: int):
+        n = node_map.get(nid)
+        if n:
+            result.append(n)
+        for child in by_parent.get(nid, []):
+            _walk(child["id"])
+    _walk(req.root_id)
+    return {"root_id": req.root_id, "nodes": result, "total": len(result)}
 
 
 # ── project compass (status) ──────────────────────────────────────────────
@@ -1095,6 +1158,25 @@ def pm_create(req: PMCreateRequest):
                                new_row={"name": req.name},
                                metadata={"endpoint": "/project/create"})
     return {"id": pid, "name": req.name, "created": created}
+
+class PMRenameRequest(BaseModel):
+    old_name: str
+    new_name: str
+
+@app.post("/project/rename")
+def pm_rename(req: PMRenameRequest):
+    _ensure_pm()
+    conn = _get_conn()
+    try:
+        result = _pm.rename_project(conn, req.old_name, req.new_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    from swiszproj import pm_backup
+    pm_backup.log_mutation("UPDATE", "pm_project", result["project_id"],
+                           old_row={"name": req.old_name},
+                           new_row={"name": req.new_name},
+                           metadata={"endpoint": "/project/rename"})
+    return result
 
 # ── PM orientation endpoint (for proactive injection) ─────────────────────
 

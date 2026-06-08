@@ -17,12 +17,27 @@ class Choice:
 @dataclass
 class Step:
     prompt: str
+    key: str = ""
+    kind: str = "text"
     choices: list = field(default_factory=list)
     default: Any = None
+    pool: str = ""
+    new_prompt: str = ""
+    next: Optional[Callable] = None
+    multiline: bool = False
+    validate: Optional[Callable] = None
+    help: str = ""
+    required: bool = False
+    skip_if: Optional[Callable] = None
+    placeholder: str = ""
 
 class Wizard:
-    def __init__(self, steps: list):
-        self.steps = steps
+    def __init__(self, steps: list = None, name: str = "", title: str = "",
+                 commit: Any = None, **_kwargs):
+        self.name = name
+        self.title = title
+        self.steps = steps or []
+        self.commit = commit
 
-def register(wizard, name: str):
+def register(wizard, name: str = ""):
     pass  # registration is a no-op in swiszproj; swiszcli handles its own registry

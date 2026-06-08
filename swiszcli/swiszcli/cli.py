@@ -845,6 +845,16 @@ def handle_slash(line: str, *, cfg: Config, mem: MemoryClient, state: AgentState
             print(c(f"  [{sid}/{role}] {preview}", DIM))
         return True
 
+    if cmd == "log":
+        # /log [SID|latest|list]   — session replay (chat + tool calls, errors highlighted)
+        import subprocess as _sp
+        sub = args[0] if args else "latest"
+        if sub == "list":
+            _sp.run(["swiszcli-swisz-log", "list"])
+        else:
+            _sp.run(["swiszcli-swisz-log", "replay", sub])
+        return True
+
     if cmd == "wiz.delete":
         if not args:
             print(c("  usage: /wiz.delete <name>", RED))
@@ -1010,7 +1020,7 @@ def make_input_session(cfg: Config) -> PromptSession:
     hist_path = cfg.state_dir / "history"
     hist_path.parent.mkdir(parents=True, exist_ok=True)
     slash_words = ["/help", "/quit", "/exit", "/model", "/ctx", "/sys",
-                   "/history", "/reset", "/warm", "/cold", "/stats", "/wiz", "/mem", "/trace", "/replay", "/view", "/wiz.delete", "/wiz.export", "/sessions", "/compact", "/project", "/proj"]
+                   "/history", "/reset", "/warm", "/cold", "/stats", "/wiz", "/mem", "/trace", "/replay", "/view", "/wiz.delete", "/wiz.export", "/sessions", "/compact", "/project", "/proj", "/log"]
     wiz_words = ["/wiz " + n for n in list_wizards()]
     mem_words = ["/mem " + n.removeprefix("mem.").replace(".", " ")
                  for n in list_wizards("mem.")]
@@ -1429,7 +1439,8 @@ def main():
     _seq_store = _SeqStore(_p0_store._conn)
     state._turn_calls = []  # accumulates swiszard calls per assistant turn
     state._last_seq_user_text = ""
-    state._traj = _Trajectory(window=8)
+    state._traj = _Trajectory.load(cfg.state_dir / "trajectory.json")
+    state._traj_path = cfg.state_dir / "trajectory.json"
     state._traj_predicted = None  # vector of predicted next user-turn point
 
     _renderer_before_seq = combined_renderer
@@ -1487,6 +1498,11 @@ def main():
                     uvec = _embed(ut)
                     state._traj.add(uvec)
                     state._traj_predicted = state._traj.predict_next()
+                    # Persist trajectory so next session starts warm
+                    try:
+                        state._traj.save(state._traj_path)
+                    except Exception:
+                        pass
                     # P1.9+P1.16: feed trajectory prediction into speculative cache
                     if state._traj_predicted is not None and not state._traj.is_settled():
                         seq_matches = _seq_store.find(state._traj_predicted, top_k=2, min_score=0.65)
@@ -1544,7 +1560,17 @@ def main():
             def _corpus():
                 try:
                     rows = _p0_store.recent_chunk_vectors(limit=400, session_id=session_id) or []
-                    return [(r.get("id"), r["vec"]) for r in rows if r.get("vec")]
+                    chunk_vecs = [(r.get("id"), r["vec"]) for r in rows if r.get("vec")]
+                    # Also pull from traces.db: all recorded agent_turn embeddings
+                    trace_vecs = []
+                    _tw_c = tracelog.get_default()
+                    if _tw_c is not None:
+                        try:
+                            for ev in _tw_c.recent_turn_embeddings(limit=500):
+                                trace_vecs.append((None, ev))
+                        except Exception:
+                            pass
+                    return chunk_vecs + trace_vecs
                 except Exception:
                     return []
             corpus = _corpus()
@@ -1591,6 +1617,31 @@ def main():
         return retry
     # ---- end P1.5 ----------------------------------------------------------
 
+    # ---- trace_turn callback: write agent_turns row after every turn -------
+    _tw_for_trace = tracelog.get_default()
+    _trace_turn_num = [0]
+    def _trace_turn(input_text: str, tools_used: list, outcome: str, latency_ms: int, turn_num: int) -> None:
+        if _tw_for_trace is None:
+            return
+        emb = None
+        try:
+            emb = _embed(input_text)
+        except _EmbedError:
+            pass
+        except Exception:
+            pass
+        _trace_turn_num[0] = turn_num
+        _tw_for_trace.record_agent_turn(
+            session_id=session_id,
+            turn_number=turn_num,
+            input_text=input_text,
+            input_embedding=emb,
+            tools_used=tools_used,
+            outcome=outcome,
+            latency_ms=latency_ms,
+        )
+    # ---- end trace_turn ----------------------------------------------------
+
     agent = Agent(
         state=state,
         chat_stream=lambda msgs: llm.chat_stream(msgs),
@@ -1604,6 +1655,7 @@ def main():
         max_tool_iters=cfg.max_tool_iters,
         confirm_destructive=confirm_destructive,
         post_stream_check=_post_stream_check,
+        trace_turn=_trace_turn,
     )
 
     banner(cfg, session_id)
@@ -1662,6 +1714,10 @@ def main():
             agent.on_token = _capture
             try:
                 agent.turn(line)
+            except KeyboardInterrupt:
+                print()
+                print(c("  [interrupted] tool loop aborted — you're back at the prompt", YELLOW))
+                _turn_outcome = "interrupted"
             except Exception as e:
                 print()
                 print(c(f"agent error: {type(e).__name__}: {e}", RED))
@@ -1731,7 +1787,6 @@ def main():
                     assignments = chain_credit.replay_trace_chain(tw, last_root['id'], corrected_str)
                     report = chain_credit.format_assignment_report(assignments)
                     if report.strip():
-                        import sys
                         print(report, file=sys.stderr)
         except Exception:
             pass

@@ -15,6 +15,7 @@ from typing import Callable
 from .protocol import extract_calls, format_tool_result, strip_calls, scrub_fabricated_results, mint_nonce, StreamFabFilter
 from .identity import to_render as _identity_to_render
 from .safety import verdict as safety_verdict, is_safe_prefix
+import time as _time
 
 
 @dataclass
@@ -59,6 +60,7 @@ class Agent:
         max_tool_iters: int = 16,
         confirm_destructive=None,
         post_stream_check=None,   # P1.5: (draft_text) -> (revised_extra_system | None)
+        trace_turn: Callable | None = None,  # (input_text, tools_used, outcome, latency_ms) -> None
     ) -> None:
         self.state = state
         self.chat_stream = chat_stream
@@ -72,6 +74,8 @@ class Agent:
         self.max_tool_iters = max_tool_iters
         self.confirm_destructive = confirm_destructive
         self.post_stream_check = post_stream_check
+        self.trace_turn = trace_turn
+        self._turn_count = 0
         # Live nonces minted for the current turn. Result blocks the model
         # emits without a matching live nonce are treated as fabrication.
         self._live_nonces: set[str] = set()
@@ -98,6 +102,7 @@ class Agent:
         clean, fabs = scrub_fabricated_results(raw, live_nonces=self._live_nonces)
         if fabs:
             ids = [f.nonce or "<no-id>" for f in fabs]
+            self._last_had_fabrication = True
             try:
                 # sff already showed the live marker; this is the post-stream
                 # confirmation with concrete ids for the user log.
@@ -111,6 +116,12 @@ class Agent:
 
         Returns the final assistant reply text (with tool blocks stripped).
         """
+        _t0 = _time.monotonic()
+        self._turn_count += 1
+        _turn_num = self._turn_count
+        _tools_used: list = []   # [{task, handler_hint, outcome, latency_ms}]
+        _turn_outcome = "success"
+        self._last_had_fabrication = False
         # Fresh nonce allowlist per turn. Stale nonces from a prior turn
         # do NOT validate a model emission this turn — keeps the model from
         # replaying old result blocks to look productive.
@@ -149,10 +160,20 @@ class Agent:
             except Exception as _e:
                 print(f"[gap-detector] failed: {_e}")
 
+        # Tasks that are clearly model placeholders/garbage — never route these.
+        _JUNK_TASKS = {'...', '…', '.', '', 'null', 'none', '?', 'todo'}
+
         iters = 0
         while True:
             calls = extract_calls(assistant_text)
             if not calls:
+                break
+            # Drop placeholder tasks before they enter the loop.
+            calls = [c for c in calls if c.task.strip().lower() not in _JUNK_TASKS and len(c.task.strip()) > 3]
+            if not calls:
+                # Model emitted only garbage task strings — break instead of looping forever.
+                sys.stderr.write("\033[33m  [agent] placeholder task(s) stripped — breaking tool loop\033[0m\n")
+                sys.stderr.flush()
                 break
             iters += 1
             if iters > self.max_tool_iters:
@@ -194,8 +215,16 @@ class Agent:
                         result = self.swiszard_do(call.task)
                     except Exception as e:
                         result = f"ERROR: {type(e).__name__}: {e}"
+                        _turn_outcome = "error"
                 dt = time.monotonic() - t0
                 self.on_tool_end(call.task, result, dt)
+                # Record this tool call for trace logging
+                _tool_outcome = "error" if (isinstance(result, str) and result.startswith("ERROR:")) else "success"
+                _tools_used.append({
+                    "task": call.task[:200],
+                    "outcome": _tool_outcome,
+                    "latency_ms": int(dt * 1000),
+                })
                 ref = None
                 if self.archive is not None:
                     try:
@@ -215,4 +244,14 @@ class Agent:
 
         # Final assistant text (no more tool calls)
         self.state.history.append(Turn("assistant", assistant_text))
-        return strip_calls(assistant_text)
+        _final = strip_calls(assistant_text)
+        # Fire trace callback (non-fatal if it fails)
+        if self.trace_turn is not None:
+            try:
+                if self._last_had_fabrication:
+                    _turn_outcome = "fabrication_stripped"
+                _latency_ms = int((_time.monotonic() - _t0) * 1000)
+                self.trace_turn(user_text, _tools_used, _turn_outcome, _latency_ms, _turn_num)
+            except Exception:
+                pass
+        return _final

@@ -167,6 +167,20 @@ def get_project_by_name(conn, name: str):
     return conn.execute("SELECT * FROM pm_project WHERE name=?", (name,)).fetchone()
 
 
+def rename_project(conn: sqlite3.Connection, old_name: str, new_name: str) -> dict:
+    old_name = _sanitize_project_name(old_name)
+    new_name = _sanitize_project_name(new_name)
+    row = conn.execute("SELECT id FROM pm_project WHERE name=?", (old_name,)).fetchone()
+    if not row:
+        raise ValueError(f"project not found: {old_name!r}")
+    clash = conn.execute("SELECT id FROM pm_project WHERE name=?", (new_name,)).fetchone()
+    if clash:
+        raise ValueError(f"project name already taken: {new_name!r}")
+    conn.execute("UPDATE pm_project SET name=? WHERE name=?", (new_name, old_name))
+    conn.commit()
+    return {"old_name": old_name, "new_name": new_name, "project_id": row["id"]}
+
+
 def list_projects(conn: sqlite3.Connection) -> list[dict]:
     rows = conn.execute(
         "SELECT p.id, p.name, p.created, "

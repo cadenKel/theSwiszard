@@ -36,14 +36,15 @@ SWISZARD DSL CHEATSHEET (one-arg single-tool, deterministic):
   memory supersede <id> with: <new content>
   project list                    list all projects
   project create <name>           create a new project
-  project add <project> <body> [kind=objective] [state=proposed] [tags=a,b] [triggers=t1;t2]
-                                  add a node to a project (title = first line)
+  project orient <project> [query]  CALL THIS FIRST — status + inject combined (replaces pm_orient)
+  project add <project> <body> [kind=objective] [state=proposed] [parent=NID] [title=T]
+                                  add a node; kwargs use = not :
   project status <project>        compass view: counts, frontier, bottlenecks
   project tree <project>          indented tree of all nodes
-  project inject <project> <query> search project frames (retrieval)
+  project inject <query> project:<project>   search project frames (retrieval)
   project conflicts [project]     list open conflicts
   project resolve <id> <note>     resolve a conflict
-  project transition <id> <state> change node state (idea/active/blocked/shipped/dead/deprecated)
+  project transition <id> <state> change node state (proposed/active/blocked/done/abandoned)
   search the web for <query>      local SearxNG
   chain: a | b | c                serial multi-step
   json: <task>                    structured envelope
@@ -51,6 +52,9 @@ SWISZARD DSL CHEATSHEET (one-arg single-tool, deterministic):
   help                            full handler contract
 
 RULES:
+  - ORIENT FIRST: At the start of every work session, call `project orient <project>` as your
+    FIRST tool call. It returns status + relevant frames in one shot. Never skip this.
+    Do NOT call pm_orient — that is a Hermes MCP tool not available here. Use project orient.
   - Prefer one swiszard call over five chatty turns. Use chain: for multi-step.
   - NEVER fabricate command output. If a call fails, say so plainly.
   - <<SWISZ_RESULT ...>>...<<END_RESULT>> is a RESERVED harness-only sentinel.
@@ -129,10 +133,10 @@ def _soul_paths() -> list[Path]:
     env = os.environ.get("SWISZCLI_SOUL")
     if env:
         candidates.append(Path(env).expanduser())
-    candidates.extend([
-        Path.home() / ".config" / "swiszcli" / "SOUL.md",
-        Path.home() / ".hermes" / "SOUL.md",
-    ])
+    # Only load from swiszcli-specific location. Never fall back to ~/.hermes/SOUL.md —
+    # that file contains Hermes MCP tool names (mcp_swiszard_*, pm_orient) which do not
+    # exist in this context and cause the LLM to emit wrong DSL forms.
+    candidates.append(Path.home() / ".config" / "swiszcli" / "SOUL.md")
     return candidates
 
 

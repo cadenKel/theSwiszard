@@ -139,7 +139,7 @@ def handler_file_find(task: str) -> str:
 # ── handler_shell ────────────────────────────────────────────────────────────
 
 _BACKTICK_RE = re.compile(chr(96) + r"([^" + chr(96) + r"]+)" + chr(96))
-_RUN_COLON_RE = re.compile(r"^\s*run\s*:\s*(.+)$", re.DOTALL)
+_RUN_COLON_RE = re.compile(r"^\s*(?:run|shell)\s*:\s*(.+)$", re.DOTALL)
 _RUN_B64_RE = re.compile(r"^\s*run_b64\s+(\S+)\s*$")
 
 
@@ -812,3 +812,345 @@ def handler_ast_pin(task: str) -> str:
         "ast pin claim NID file:PATH type:TYPE name:NAME | "
         "ast pin verify NID"
     )
+
+
+# ── handler_proj ─────────────────────────────────────────────────────────────
+# DSL (all forms below):
+#   project list                          — list all projects
+#   project status NAME                   — compass: north star, counts, frontier
+#   project tree NAME                     — living node tree
+#   project node NID                      — inspect one node
+#   project add NAME body: BODY [kind:K state:S parent:NID title:T]
+#   project transition NID STATE          — move node to state
+#   project inject QUERY [project:NAME]   — semantic inject frames
+#   project conflicts [NAME]              — list active conflicts
+
+_PROJ_SERVER = "http://127.0.0.1:7437"
+
+
+def _proj_post(path: str, payload: dict) -> dict:
+    url = _PROJ_SERVER + path
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read())
+
+
+def _proj_get(path: str) -> dict:
+    with urllib.request.urlopen(_PROJ_SERVER + path, timeout=10) as resp:
+        return json.loads(resp.read())
+
+
+def handler_proj(task: str) -> str:
+    t = task.strip()
+    # strip optional "project " prefix (router may or may not include it)
+    t = re.sub(r"^project\s+", "", t, flags=re.IGNORECASE).strip()
+    lower = t.lower()
+
+    # ── list ─────────────────────────────────────────────────────────────────
+    if re.match(r"^list\s*$", lower):
+        data = _proj_get("/project/list")
+        projects = data.get("projects", data) if isinstance(data, dict) else data
+        if not projects:
+            return "No projects found."
+        lines = [f"Projects ({len(projects)}):"]
+        for p in projects:
+            if isinstance(p, dict):
+                lines.append(f"  {p.get('name','?'):24}  id={p.get('id','?')}  nodes={p.get('node_count','?')}")
+            else:
+                lines.append(f"  {p}")
+        return "\n".join(lines)
+
+    # ── status NAME ──────────────────────────────────────────────────────────
+    m = re.match(r"^status\s+(\S+)\s*$", t, re.IGNORECASE)
+    if m:
+        data = _proj_post("/project/status", {"project": m.group(1)})
+        return json.dumps(data, indent=2)
+
+    # ── tree NAME ────────────────────────────────────────────────────────────
+    m = re.match(r"^tree\s+(\S+)\s*$", t, re.IGNORECASE)
+    if m:
+        data = _proj_post("/project/tree", {"project": m.group(1)})
+        return json.dumps(data, indent=2)
+
+    # ── node NID ─────────────────────────────────────────────────────────────
+    m = re.match(r"^node\s+(\d+)\s*$", t, re.IGNORECASE)
+    if m:
+        data = _proj_post("/project/node", {"node_id": int(m.group(1))})
+        return json.dumps(data, indent=2)
+
+    # ── transition NID STATE ─────────────────────────────────────────────────
+    m = re.match(r"^transition\s+(\d+)\s+(\S+)\s*$", t, re.IGNORECASE)
+    if m:
+        data = _proj_post("/project/transition",
+                          {"node_id": int(m.group(1)), "state": m.group(2)})
+        return json.dumps(data, indent=2)
+
+    # ── inject QUERY [project:NAME] ──────────────────────────────────────────
+    m = re.match(r"^inject\s+(.+)$", t, re.IGNORECASE)
+    if m:
+        rest = m.group(1)
+        proj_m = re.search(r"\bproject:(\S+)", rest)
+        query = re.sub(r"\bproject:\S+", "", rest).strip()
+        payload = {"query": query, "top_k": 4}
+        if proj_m:
+            payload["active_project"] = proj_m.group(1)
+        data = _proj_post("/project/inject", payload)
+        frames = data.get("frames", data) if isinstance(data, dict) else data
+        return json.dumps(frames, indent=2)
+
+    # ── conflicts [NAME] ─────────────────────────────────────────────────────
+    m = re.match(r"^conflicts(?:\s+(\S+))?\s*$", t, re.IGNORECASE)
+    if m:
+        payload = {}
+        if m.group(1):
+            payload["project"] = m.group(1)
+        data = _proj_post("/project/conflicts", payload)
+        conflicts = data.get("conflicts", data) if isinstance(data, dict) else data
+        if not conflicts:
+            return "No active conflicts."
+        return json.dumps(conflicts, indent=2)
+
+    # ── add NAME body:BODY [kind:K state:S parent:NID title:T] ───────────────
+    m = re.match(r"^add\s+(\S+)\s+(.+)$", t, re.IGNORECASE)
+    if m:
+        project = m.group(1)
+        rest = m.group(2)
+        # Parse key: value pairs
+        body_m = re.search(r"body[=:]\s*(.+?)(?:\s+(?:kind|state|parent|title)[=:]|$)", rest, re.IGNORECASE | re.DOTALL)
+        if body_m:
+            body = body_m.group(1).strip()
+        else:
+            # No explicit body: prefix — body is everything before the first key=val kwarg
+            body = re.sub(r"\s+(?:kind|state|parent|title)[=:]\S+", "", rest, flags=re.IGNORECASE).strip() or rest.strip()
+        kind_m  = re.search(r"\bkind[=:](\S+)", rest, re.IGNORECASE)
+        state_m = re.search(r"\bstate[=:](\S+)", rest, re.IGNORECASE)
+        par_m   = re.search(r"\bparent[=:](\d+)", rest, re.IGNORECASE)
+        title_m = re.search(r"\btitle[=:]([^=:]+?)(?:\s+(?:kind|state|parent|body)[=:]|$)", rest, re.IGNORECASE)
+        payload = {
+            "project": project, "body": body,
+            "kind":    kind_m.group(1)  if kind_m  else "task",
+            "state":   state_m.group(1) if state_m else "proposed",
+            "parent_id": int(par_m.group(1)) if par_m else None,
+            "title":   title_m.group(1).strip() if title_m else None,
+            "tags": [], "triggers": [], "scan_conflicts": True,
+        }
+        data = _proj_post("/project/add_node", payload)
+        return json.dumps(data, indent=2)
+
+    # ── orient NAME [QUERY] ──────────────────────────────────────────────────
+    # Combines status + inject in one shot. The LLM should call this at the
+    # START of every work session instead of pm_orient (which is a Hermes MCP
+    # tool not available inside the swiszcli harness).
+    m = re.match(r"^orient\s+(\S+)(?:\s+(.+))?$", t, re.IGNORECASE)
+    if m:
+        proj  = m.group(1)
+        query = (m.group(2) or "").strip()
+        status_data = _proj_post("/project/status", {"project": proj})
+        result = {"status": status_data}
+        if query:
+            inject_payload = {"query": query, "top_k": 4, "active_project": proj}
+            inject_data = _proj_post("/project/inject", inject_payload)
+            frames = inject_data.get("frames", inject_data) if isinstance(inject_data, dict) else inject_data
+            result["frames"] = frames
+        return json.dumps(result, indent=2)
+
+    # ── rename OLD NEW ───────────────────────────────────────────────────────
+    m = re.match(r"^rename\s+(\S+)\s+(\S+)\s*$", t, re.IGNORECASE)
+    if m:
+        data = _proj_post("/project/rename", {"old_name": m.group(1), "new_name": m.group(2)})
+        return json.dumps(data, indent=2)
+
+    # ── create NAME ──────────────────────────────────────────────────────────
+    # Projects auto-create on first add; this is an explicit alias.
+    m = re.match(r"^create\s+(\S+)\s*$", t, re.IGNORECASE)
+    if m:
+        # Add a root node which implicitly creates the project
+        payload = {
+            "project": m.group(1),
+            "body": f"Project root for {m.group(1)}",
+            "kind": "objective", "state": "proposed",
+            "parent_id": None, "title": m.group(1),
+            "tags": [], "triggers": [], "scan_conflicts": False,
+        }
+        data = _proj_post("/project/add_node", payload)
+        return json.dumps(data, indent=2)
+
+    return (
+        "handler_proj: unrecognized form. DSL:\n"
+        "  project list\n"
+        "  project create NAME\n"
+        "  project rename OLD NEW\n"
+        "  project status NAME\n"
+        "  project tree NAME\n"
+        "  project orient NAME [QUERY]   — status + inject in one call (use this at session start)\n"
+        "  project node NID\n"
+        "  project transition NID STATE\n"
+        "  project inject QUERY [project:NAME]\n"
+        "  project conflicts [NAME]\n"
+        "  project add NAME BODY [kind=K] [state=S] [parent=NID] [title=T]"
+    )
+
+
+# ── handler_session ───────────────────────────────────────────────────────────
+# Forms:
+#   session replay [SID]   — interleaved chat+tool timeline, errors highlighted
+#   session list           — list all sessions newest-first
+#
+# Used internally by CADEN to diagnose swisz sessions. Humans talk to CADEN;
+# CADEN calls this. Do NOT add a user-facing CLI menu.
+
+def handler_session(task: str) -> str:
+    import re as _re
+    import sqlite3 as _sqlite3
+    import json as _json
+    from datetime import datetime as _dt
+    from pathlib import Path as _Path
+
+    # lazy import swiszcli config — it lives in a sibling package in the same venv
+    try:
+        from swiszcli.config import Config as _Cfg
+        state_dir = _Cfg().state_dir
+    except Exception as e:
+        return f"handler_session: could not locate swiszcli state dir: {e}"
+
+    calls_dir  = state_dir / "swisz_calls"
+    session_db = state_dir / "sessions.db"
+
+    t = task.strip()
+    # strip leading "session" prefix
+    t = _re.sub(r"^session\s*", "", t, flags=_re.IGNORECASE).strip()
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    def _resolve_sid(sid):
+        if not calls_dir.exists():
+            return None, "no swisz_calls dir"
+        if not sid or sid.lower() == "latest":
+            latest = calls_dir / "latest"
+            if latest.exists():
+                return latest.resolve(), None
+            files = sorted(calls_dir.glob("swisz_*.jsonl"),
+                           key=lambda p: p.stat().st_mtime, reverse=True)
+            return (files[0], None) if files else (None, "no sessions yet")
+        cands = sorted(calls_dir.glob(f"{sid}*.jsonl"))
+        if not cands:
+            cands = sorted(calls_dir.glob(f"*{sid}*.jsonl"))
+        if not cands:
+            return None, f"no log matches {sid!r}"
+        return cands[0], None
+
+    def _load_calls(path):
+        rows = []
+        if not path or not path.exists():
+            return rows
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        rows.append(_json.loads(line))
+                    except Exception:
+                        pass
+        return rows
+
+    def _load_messages(sid):
+        rows = []
+        if not session_db.exists():
+            return rows
+        try:
+            conn = _sqlite3.connect(str(session_db))
+            for ts, role, content in conn.execute(
+                "SELECT ts, role, content FROM messages WHERE session_id=? ORDER BY ts",
+                (sid,)
+            ).fetchall():
+                rows.append({"ts": float(ts), "role": role, "content": content, "_type": "msg"})
+            conn.close()
+        except Exception:
+            pass
+        return rows
+
+    def _trunc(s, n):
+        if not isinstance(s, str):
+            s = repr(s)
+        s = s.replace("\n", " ")
+        return s if len(s) <= n else s[:n - 1] + "…"
+
+    def _is_err(call):
+        if call.get("error"):
+            return True
+        r = call.get("result", "") or ""
+        return isinstance(r, str) and r.strip().lower().startswith(
+            ("error", "handler_shell: no command")
+        )
+
+    # ── list ─────────────────────────────────────────────────────────────────
+    if t.startswith("list"):
+        if not calls_dir.exists():
+            return "handler_session: no sessions yet"
+        files = sorted(calls_dir.glob("swisz_*.jsonl"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        if not files:
+            return "handler_session: no sessions yet"
+        lines = []
+        for p in files[:20]:
+            calls = _load_calls(p)
+            errs  = sum(1 for c in calls if _is_err(c))
+            mtime = _dt.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            lines.append(f"  {p.stem}  {mtime}  calls={len(calls)}  errors={errs}")
+        return "\n".join(lines)
+
+    # ── replay ───────────────────────────────────────────────────────────────
+    sid_arg = None
+    m = _re.match(r"replay\s*(swisz_\S+|\w+)?", t, _re.IGNORECASE)
+    if m:
+        sid_arg = m.group(1)
+
+    path, err = _resolve_sid(sid_arg)
+    if err:
+        return f"handler_session: {err}"
+
+    session_id = path.stem
+    calls = _load_calls(path)
+    messages = _load_messages(session_id)
+
+    for c in calls:
+        c["_type"] = "call"
+    events = sorted(messages + calls, key=lambda e: e.get("ts", 0))
+
+    if not events:
+        return f"handler_session: no events for {session_id}"
+
+    error_calls = [c for c in calls if _is_err(c)]
+    out = [f"SESSION {session_id}  |  {len(messages)} messages  {len(calls)} tool calls  {len(error_calls)} errors"]
+
+    if error_calls:
+        out.append("\nERRORS:")
+        for ec in error_calls:
+            ts = _dt.fromtimestamp(ec["ts"]).strftime("%H:%M:%S")
+            out.append(f"  [{ts}] {_trunc(ec.get('task',''), 80)}")
+            out.append(f"         -> {_trunc(ec.get('result','') or ec.get('error',''), 100)}")
+
+    out.append("\nTIMELINE:")
+    for ev in events:
+        ts = _dt.fromtimestamp(ev.get("ts", 0)).strftime("%H:%M:%S")
+        if ev["_type"] == "msg":
+            role = ev["role"].upper()
+            clean = _re.sub(r"<<SWISZ>>.*?<<END>>", "[tool]", ev["content"], flags=_re.DOTALL).strip()
+            out.append(f"  [{ts}] {role:<10} {_trunc(clean, 200)}")
+        else:
+            handler = ev.get("handler", "?")
+            dur     = ev.get("duration_ms", 0)
+            task_s  = _trunc(ev.get("task", ""), 72)
+            if _is_err(ev):
+                result_s = _trunc(ev.get("result","") or ev.get("error",""), 90)
+                out.append(f"  [{ts}] ERR [{handler}] {task_s}")
+                out.append(f"         -> {result_s}")
+            else:
+                out.append(f"  [{ts}] --- [{handler}] {task_s} ({dur}ms)")
+
+    return "\n".join(out)

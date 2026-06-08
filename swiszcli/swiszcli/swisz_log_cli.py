@@ -174,6 +174,113 @@ def cmd_call(call_id):
     sys.exit(f"no call with id {call_id}")
 
 
+# ── ANSI helpers (no deps) ───────────────────────────────────────────────────
+_RESET  = "\033[0m"
+_BOLD   = "\033[1m"
+_DIM    = "\033[2m"
+_RED    = "\033[31m"
+_GREEN  = "\033[32m"
+_YELLOW = "\033[33m"
+_CYAN   = "\033[36m"
+_WHITE  = "\033[97m"
+
+def _c(text, *codes):
+    return "".join(codes) + str(text) + _RESET
+
+
+def cmd_replay(sid=None):
+    """Interleaved timeline: chat messages + tool calls, errors in red."""
+    import sqlite3
+
+    log_path = _resolve(sid)
+    session_id = log_path.stem  # e.g. swisz_070cc59c
+
+    # ── load tool calls ──────────────────────────────────────────────────────
+    calls = list(_iter(log_path))
+    # ── load chat messages from sessions.db ──────────────────────────────────
+    sessions_db = Config().state_dir / "sessions.db"
+    messages = []
+    if sessions_db.exists():
+        try:
+            conn = sqlite3.connect(str(sessions_db))
+            rows = conn.execute(
+                "SELECT ts, role, content FROM messages WHERE session_id=? ORDER BY ts",
+                (session_id,)
+            ).fetchall()
+            for ts, role, content in rows:
+                messages.append({"ts": float(ts), "role": role, "content": content, "_type": "msg"})
+            conn.close()
+        except Exception as e:
+            print(_c(f"  warn: could not read sessions.db: {e}", _YELLOW), file=sys.stderr)
+
+    # tag tool calls
+    for c in calls:
+        c["_type"] = "call"
+
+    # ── merge + sort by timestamp ─────────────────────────────────────────────
+    events = sorted(messages + calls, key=lambda e: e.get("ts", 0))
+
+    if not events:
+        print(f"no events found for session {session_id}")
+        return
+
+    # ── error summary first ───────────────────────────────────────────────────
+    error_calls = [c for c in calls if c.get("error") or
+                   (isinstance(c.get("result"), str) and
+                    c["result"].strip().lower().startswith(("error", "handler_shell: no command")))]
+    print(_c(f"\n SESSION REPLAY: {session_id}", _BOLD, _WHITE))
+    print(_c(f"  {len(messages)} chat messages  |  {len(calls)} tool calls  |  "
+             f"{len(error_calls)} errors\n", _DIM))
+
+    if error_calls:
+        print(_c("  ERROR SUMMARY:", _BOLD, _RED))
+        for ec in error_calls:
+            ts = datetime.fromtimestamp(ec["ts"]).strftime("%H:%M:%S")
+            task_s = _trunc(ec.get("task", ""), 80)
+            result_s = _trunc(ec.get("result", "") or ec.get("error", ""), 100)
+            print(_c(f"    [{ts}] {task_s}", _RED))
+            print(_c(f"           -> {result_s}", _DIM))
+        print()
+
+    # ── timeline ──────────────────────────────────────────────────────────────
+    print(_c("  TIMELINE:", _BOLD))
+    msg_num = 0
+    call_num = 0
+    for ev in events:
+        ts_str = datetime.fromtimestamp(ev.get("ts", 0)).strftime("%H:%M:%S")
+
+        if ev["_type"] == "msg":
+            msg_num += 1
+            role = ev["role"]
+            content = ev["content"]
+            # strip <<SWISZ>>...<<END>> blocks from assistant messages (they're the calls)
+            clean = re.sub(r"<<SWISZ>>.*?<<END>>", "[tool-call]", content, flags=re.DOTALL).strip()
+            label_color = _CYAN if role == "user" else _GREEN
+            label = f"  [{ts_str}] {role.upper():<10}"
+            print(_c(label, _BOLD, label_color), end="")
+            # first 200 chars, then ellipsis
+            snippet = _trunc(clean, 200)
+            print(f" {snippet}")
+
+        elif ev["_type"] == "call":
+            call_num += 1
+            task = _trunc(ev.get("task", ""), 72)
+            handler = ev.get("handler", "?")
+            dur = ev.get("duration_ms", 0)
+            is_err = bool(ev.get("error")) or (
+                isinstance(ev.get("result"), str) and
+                ev["result"].strip().lower().startswith(("error", "handler_shell: no command"))
+            )
+            result_s = _trunc(ev.get("result", "") or "", 90)
+            if is_err:
+                print(_c(f"    [{ts_str}] TOOL [{handler}] {task}", _RED))
+                print(_c(f"             ERR: {result_s}", _RED, _DIM))
+            else:
+                print(_c(f"    [{ts_str}] tool [{handler}] {task} ({dur}ms)", _DIM))
+
+    print()
+
+
 def main():
     args = sys.argv[1:]
     if not args or args[0] == "latest":
@@ -199,6 +306,8 @@ def main():
         if not rest:
             sys.exit("call needs CALL_ID")
         cmd_call(rest[0])
+    elif cmd == "replay":
+        cmd_replay(rest[0] if rest else None)
     elif cmd in ("-h", "--help", "help"):
         print(__doc__)
     else:

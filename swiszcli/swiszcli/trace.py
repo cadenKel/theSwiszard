@@ -33,6 +33,20 @@ CREATE TABLE IF NOT EXISTS traces (
 CREATE INDEX IF NOT EXISTS idx_traces_wiz    ON traces(wizard);
 CREATE INDEX IF NOT EXISTS idx_traces_parent ON traces(parent_id);
 CREATE INDEX IF NOT EXISTS idx_traces_start  ON traces(started_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_turns (
+    id              TEXT PRIMARY KEY,
+    session_id      TEXT NOT NULL,
+    turn_number     INTEGER NOT NULL,
+    timestamp       REAL NOT NULL,
+    input_text      TEXT NOT NULL,
+    input_embedding BLOB,              -- JSON-encoded float list (768-dim)
+    tools_used      TEXT NOT NULL,     -- JSON array of {task, handler, outcome, latency_ms}
+    outcome         TEXT NOT NULL,     -- success | error | fabrication_stripped
+    latency_ms      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_at_session ON agent_turns(session_id);
+CREATE INDEX IF NOT EXISTS idx_at_ts      ON agent_turns(timestamp DESC);
 """
 
 
@@ -105,6 +119,49 @@ class TraceWriter:
             (trace_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── agent turn logging ───────────────────────────────────────────────
+    def record_agent_turn(
+        self,
+        *,
+        session_id: str,
+        turn_number: int,
+        input_text: str,
+        input_embedding: list | None,
+        tools_used: list,          # [{task, handler, outcome, latency_ms}]
+        outcome: str,              # success | error | fabrication_stripped
+        latency_ms: int,
+    ) -> str:
+        turn_id = "at_" + uuid.uuid4().hex[:12]
+        emb_blob = json.dumps(input_embedding) if input_embedding else None
+        self._conn.execute(
+            """INSERT INTO agent_turns
+               (id, session_id, turn_number, timestamp,
+                input_text, input_embedding, tools_used, outcome, latency_ms)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (turn_id, session_id, turn_number, time.time(),
+             input_text, emb_blob,
+             json.dumps(_json_safe(tools_used)),
+             outcome, latency_ms),
+        )
+        self._conn.commit()
+        return turn_id
+
+    def recent_turn_embeddings(self, limit: int = 500) -> list[list[float]]:
+        """Return up to `limit` input embedding vectors for void-detector corpus."""
+        rows = self._conn.execute(
+            "SELECT input_embedding FROM agent_turns "
+            "WHERE input_embedding IS NOT NULL "
+            "ORDER BY timestamp DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        result = []
+        for r in rows:
+            try:
+                result.append(json.loads(r[0]))
+            except Exception:
+                pass
+        return result
 
 
 # Process-singleton, mirrors pools.py
