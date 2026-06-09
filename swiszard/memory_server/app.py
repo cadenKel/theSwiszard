@@ -51,6 +51,10 @@ from .db import (
 from .embed import embed_to_blob, top_k_rows, embed, blob_to_array, cosine_similarity
 from . import embedding_rows as _er
 from . import code_index as _ci
+from .context_store import ContextStore
+from . import looking_glass as _lg
+
+_ctx_store: ContextStore | None = None
 
 PIN_LIMIT = 5
 HOME = Path.home()
@@ -109,8 +113,11 @@ def _get_conn():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _ctx_store
     log.info("memory server v2 starting — initialising db")
     _get_conn()
+    _ctx_store = ContextStore()
+    log.info("context store initialised")
     log.info("memory server ready")
     try:
         _ci.start_watcher(lambda: get_connection())
@@ -119,6 +126,8 @@ async def lifespan(app: FastAPI):
     yield
     if _conn:
         _conn.close()
+    if _ctx_store:
+        _ctx_store.close()
     log.info("memory server shut down")
 
 
@@ -1319,3 +1328,95 @@ def router_match(task: str, dry_run: bool = True):
     if '[dry-run] would route to:' in result:
         handler = result.split('would route to:',1)[1].strip()
     return {'task': task, 'handler': handler, 'raw': result}
+
+
+# ── swiszcontext endpoints ────────────────────────────────────────────────────
+
+class ContextAppendRequest(BaseModel):
+    session_id:  str
+    turn_number: int
+    role:        str
+    content:     str
+
+class ContextRecallRequest(BaseModel):
+    session_id:     str
+    situation_text: str
+    top_k:          int = 5
+
+class ContextStatsRequest(BaseModel):
+    session_id: str
+
+
+@app.post('/context/append')
+def context_append(req: ContextAppendRequest):
+    if _ctx_store is None:
+        raise HTTPException(status_code=503, detail='context store not initialised')
+    _ctx_store.append_turn(req.session_id, req.turn_number, req.role, req.content)
+    return {'ok': True}
+
+
+@app.post('/context/recall')
+def context_recall(req: ContextRecallRequest):
+    if _ctx_store is None:
+        raise HTTPException(status_code=503, detail='context store not initialised')
+    frames = _ctx_store.recall(req.session_id, req.situation_text, req.top_k)
+    return {'frames': frames, 'count': len(frames)}
+
+
+@app.post('/context/stats')
+def context_stats(req: ContextStatsRequest):
+    if _ctx_store is None:
+        raise HTTPException(status_code=503, detail='context store not initialised')
+    return _ctx_store.stats(req.session_id)
+
+
+# ── looking_glass endpoints ───────────────────────────────────────────────────
+
+class GlassConsultRequest(BaseModel):
+    thought:   str
+    top_k:     int   = 5
+    min_score: float = 0.40
+
+class GlassStoreConsequenceRequest(BaseModel):
+    why:            str
+    tool_name:      str
+    result_summary: str
+    session_id:     str
+    turn:           int = -1
+
+
+@app.post('/glass/consult')
+def glass_consult(req: GlassConsultRequest):
+    conn    = _get_conn()
+    results = _lg.consult(conn, req.thought, req.top_k, req.min_score)
+    formatted = _lg.format_for_prompt(results)
+    return {
+        'results': [
+            {
+                'memory_id':      r.memory_id,
+                'memory_content': r.memory_content,
+                'trigger_text':   r.trigger_text,
+                'score':          r.score,
+                'kind':           r.kind,
+                'tags':           r.tags,
+            }
+            for r in results
+        ],
+        'formatted': formatted,
+        'count':     len(results),
+    }
+
+
+@app.post('/glass/store_consequence')
+def glass_store_consequence(req: GlassStoreConsequenceRequest):
+    conn = _get_conn()
+    memory_id = _lg.store_consequence(
+        conn=conn,
+        why=req.why,
+        tool_name=req.tool_name,
+        result_summary=req.result_summary,
+        session_id=req.session_id,
+        turn=req.turn,
+        insert_memory_fn=insert_memory,
+    )
+    return {'ok': True, 'memory_id': memory_id}

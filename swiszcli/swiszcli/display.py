@@ -64,3 +64,24 @@ def print_wizard_table(wizards: list[dict]) -> None:
 
 def print_error(msg: str) -> None:
     console.print(f"[bold red]error:[/bold red] {msg}")
+
+# ── phase transparency ────────────────────────────────────────────────────────
+
+def print_phase(label: str) -> None:
+    """Print a dim phase marker, e.g. '  ◆ orient' or '  ◆ situation fill'."""
+    console.print(f"  [dim cyan]◆ {label}[/dim cyan]")
+
+def print_situation(situation: str, label: str = "situation") -> None:
+    """Print the filled/updated SITUATION block in a dim box."""
+    console.print(f"  [dim]── {label} ──[/dim]")
+    for line in situation.strip().splitlines():
+        console.print(f"  [dim]{line}[/dim]")
+
+def print_glass(pass_num: int, result: str) -> None:
+    """Print glass consult result for a given pass."""
+    preview = result.strip()[:300].replace("\n", " ↩ ")
+    suffix = "…" if len(result.strip()) > 300 else ""
+    console.print(f"  [dim yellow]glass {pass_num}▸[/dim yellow] [dim]{preview}{suffix}[/dim]")
+
+def print_phase_error(phase: str, err: str) -> None:
+    console.print(f"  [bold red]✗ {phase}:[/bold red] [dim]{err[:200]}[/dim]")
