@@ -1,8 +1,8 @@
-"""swiszproj: thin HTTP client for swizmem project-manager routes.
+"""swiszproj: thin HTTP client for swiszPM routes.
 
 Mirrors memory_server.app /project/* endpoints exactly. Fails loud.
 The server accepts project NAMES (strings) for most routes, resolving
-to project_id internally. /project/create returns {id, name}.
+to project_id internally.
 """
 from __future__ import annotations
 from typing import Any
@@ -43,13 +43,13 @@ class ProjectClient:
                  kind: str = "objective", state: str = "proposed",
                  parent_id: int | None = None,
                  tags: list[str] | None = None,
-                 triggers: list[str] | None = None,
                  title: str | None = None,
+                 trigger_text: str = "",
                  scan_conflicts: bool = True) -> dict[str, Any]:
         return self._post("/project/add_node", {
             "project": project, "body": body, "kind": kind, "state": state,
             "parent_id": parent_id, "tags": tags or [],
-            "triggers": triggers or [], "title": title,
+            "title": title, "trigger_text": trigger_text,
             "scan_conflicts": scan_conflicts,
         })
 
@@ -59,14 +59,23 @@ class ProjectClient:
                           {"project": project, "body": body, "top_k": top_k})
         return data.get("candidates", []) if isinstance(data, dict) else data
 
-    # ---- retrieval ----
-    def inject(self, query: str, *, active_project: str | None = None,
-               top_k: int = 4) -> list[dict[str, Any]]:
-        payload = {"query": query, "top_k": top_k}
-        if active_project:
-            payload["active_project"] = active_project
-        data = self._post("/project/inject", payload)
-        return data.get("frames", []) if isinstance(data, dict) else data
+    # ---- tool call log ----
+    def log_tool_call(self, node_id: int, why: str, tool_name: str,
+                      tool_args: dict | None = None, result_summary: str = "",
+                      success: bool = True) -> dict[str, Any]:
+        return self._post("/project/log_tool_call", {
+            "node_id": node_id, "why": why, "tool_name": tool_name,
+            "tool_args": tool_args or {}, "result_summary": result_summary,
+            "success": success,
+        })
+
+    def get_tool_calls(self, node_id: int) -> list[dict[str, Any]]:
+        data = self._get(f"/project/tool_calls/{node_id}")
+        return data.get("calls", []) if isinstance(data, dict) else data
+
+    def get_failed_tool_calls(self, node_id: int) -> list[dict[str, Any]]:
+        data = self._get(f"/project/failed_tool_calls/{node_id}")
+        return data.get("calls", []) if isinstance(data, dict) else data
 
     # ---- conflicts ----
     def conflicts(self, project: str | None = None) -> list[dict[str, Any]]:

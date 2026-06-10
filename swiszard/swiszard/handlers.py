@@ -824,25 +824,19 @@ def handler_ast_pin(task: str) -> str:
 #   project transition NID STATE          — move node to state
 #   project inject QUERY [project:NAME]   — semantic inject frames
 #   project conflicts [NAME]              — list active conflicts
+#   project orient NAME [QUERY]           — status + inject in one call
+#   project create NAME                   — explicit create (auto-creates on add)
+#   project rename OLD NEW                — rename a project
 
-_PROJ_SERVER = "http://127.0.0.1:7437"
+# Module-level client — one per handler process
+_proj_client = None
 
-
-def _proj_post(path: str, payload: dict) -> dict:
-    url = _PROJ_SERVER + path
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        url, data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read())
-
-
-def _proj_get(path: str) -> dict:
-    with urllib.request.urlopen(_PROJ_SERVER + path, timeout=10) as resp:
-        return json.loads(resp.read())
+def _get_proj_client():
+    global _proj_client
+    if _proj_client is None:
+        from swiszproj.client import ProjectClient
+        _proj_client = ProjectClient("http://127.0.0.1:7437", timeout=15)
+    return _proj_client
 
 
 def handler_proj(task: str) -> str:
@@ -850,45 +844,43 @@ def handler_proj(task: str) -> str:
     # strip optional "project " prefix (router may or may not include it)
     t = re.sub(r"^project\s+", "", t, flags=re.IGNORECASE).strip()
     lower = t.lower()
+    pc = _get_proj_client()
 
     # ── list ─────────────────────────────────────────────────────────────────
     if re.match(r"^list\s*$", lower):
-        data = _proj_get("/project/list")
-        projects = data.get("projects", data) if isinstance(data, dict) else data
+        projects = pc.list()
         if not projects:
             return "No projects found."
         lines = [f"Projects ({len(projects)}):"]
         for p in projects:
-            if isinstance(p, dict):
-                lines.append(f"  {p.get('name','?'):24}  id={p.get('id','?')}  nodes={p.get('node_count','?')}")
-            else:
-                lines.append(f"  {p}")
+            lines.append(f"  {p.get('name','?'):24}  id={p.get('id','?')}  nodes={p.get('node_count','?')}")
         return "\n".join(lines)
 
     # ── status NAME ──────────────────────────────────────────────────────────
     m = re.match(r"^status\s+(\S+)\s*$", t, re.IGNORECASE)
     if m:
-        data = _proj_post("/project/status", {"project": m.group(1)})
-        return json.dumps(data, indent=2)
+        return json.dumps(pc.status(m.group(1)), indent=2)
 
     # ── tree NAME ────────────────────────────────────────────────────────────
     m = re.match(r"^tree\s+(\S+)\s*$", t, re.IGNORECASE)
     if m:
-        data = _proj_post("/project/tree", {"project": m.group(1)})
-        return json.dumps(data, indent=2)
+        return json.dumps(pc.tree(m.group(1)), indent=2)
 
     # ── node NID ─────────────────────────────────────────────────────────────
     m = re.match(r"^node\s+(\d+)\s*$", t, re.IGNORECASE)
     if m:
-        data = _proj_post("/project/node", {"node_id": int(m.group(1))})
-        return json.dumps(data, indent=2)
+        d = pc.tree("")  # placeholder — node fetch via /project/node
+        import urllib.request as _ur
+        data = json.dumps({"node_id": int(m.group(1))}).encode()
+        req = _ur.Request("http://127.0.0.1:7437/project/node", data=data,
+                          headers={"Content-Type": "application/json"}, method="POST")
+        with _ur.urlopen(req, timeout=10) as resp:
+            return json.dumps(json.loads(resp.read()), indent=2)
 
     # ── transition NID STATE ─────────────────────────────────────────────────
     m = re.match(r"^transition\s+(\d+)\s+(\S+)\s*$", t, re.IGNORECASE)
     if m:
-        data = _proj_post("/project/transition",
-                          {"node_id": int(m.group(1)), "state": m.group(2)})
-        return json.dumps(data, indent=2)
+        return json.dumps(pc.transition(int(m.group(1)), m.group(2)), indent=2)
 
     # ── inject QUERY [project:NAME] ──────────────────────────────────────────
     m = re.match(r"^inject\s+(.+)$", t, re.IGNORECASE)
@@ -899,18 +891,21 @@ def handler_proj(task: str) -> str:
         payload = {"query": query, "top_k": 4}
         if proj_m:
             payload["active_project"] = proj_m.group(1)
-        data = _proj_post("/project/inject", payload)
-        frames = data.get("frames", data) if isinstance(data, dict) else data
+        import urllib.request as _ur
+        data = json.dumps(payload).encode()
+        req = _ur.Request("http://127.0.0.1:7437/project/inject", data=data,
+                          headers={"Content-Type": "application/json"}, method="POST")
+        with _ur.urlopen(req, timeout=15) as resp:
+            frames = json.loads(resp.read()).get("frames", [])
         return json.dumps(frames, indent=2)
 
     # ── conflicts [NAME] ─────────────────────────────────────────────────────
     m = re.match(r"^conflicts(?:\s+(\S+))?\s*$", t, re.IGNORECASE)
     if m:
-        payload = {}
+        kwargs = {}
         if m.group(1):
-            payload["project"] = m.group(1)
-        data = _proj_post("/project/conflicts", payload)
-        conflicts = data.get("conflicts", data) if isinstance(data, dict) else data
+            kwargs["project"] = m.group(1)
+        conflicts = pc.conflicts(**kwargs)
         if not conflicts:
             return "No active conflicts."
         return json.dumps(conflicts, indent=2)
@@ -920,65 +915,57 @@ def handler_proj(task: str) -> str:
     if m:
         project = m.group(1)
         rest = m.group(2)
-        # Parse key: value pairs
         body_m = re.search(r"body[=:]\s*(.+?)(?:\s+(?:kind|state|parent|title)[=:]|$)", rest, re.IGNORECASE | re.DOTALL)
         if body_m:
             body = body_m.group(1).strip()
         else:
-            # No explicit body: prefix — body is everything before the first key=val kwarg
             body = re.sub(r"\s+(?:kind|state|parent|title)[=:]\S+", "", rest, flags=re.IGNORECASE).strip() or rest.strip()
         kind_m  = re.search(r"\bkind[=:](\S+)", rest, re.IGNORECASE)
         state_m = re.search(r"\bstate[=:](\S+)", rest, re.IGNORECASE)
         par_m   = re.search(r"\bparent[=:](\d+)", rest, re.IGNORECASE)
         title_m = re.search(r"\btitle[=:]([^=:]+?)(?:\s+(?:kind|state|parent|body)[=:]|$)", rest, re.IGNORECASE)
-        payload = {
-            "project": project, "body": body,
-            "kind":    kind_m.group(1)  if kind_m  else "task",
-            "state":   state_m.group(1) if state_m else "proposed",
-            "parent_id": int(par_m.group(1)) if par_m else None,
-            "title":   title_m.group(1).strip() if title_m else None,
-            "tags": [], "triggers": [], "scan_conflicts": True,
-        }
-        data = _proj_post("/project/add_node", payload)
-        return json.dumps(data, indent=2)
+        return json.dumps(pc.add_node(
+            project, body,
+            kind=kind_m.group(1) if kind_m else "task",
+            state=state_m.group(1) if state_m else "proposed",
+            parent_id=int(par_m.group(1)) if par_m else None,
+            title=title_m.group(1).strip() if title_m else None,
+        ), indent=2)
 
     # ── orient NAME [QUERY] ──────────────────────────────────────────────────
-    # Combines status + inject in one shot. The LLM should call this at the
-    # START of every work session instead of pm_orient (which is a Hermes MCP
-    # tool not available inside the swiszcli harness).
     m = re.match(r"^orient\s+(\S+)(?:\s+(.+))?$", t, re.IGNORECASE)
     if m:
-        proj  = m.group(1)
+        proj = m.group(1)
         query = (m.group(2) or "").strip()
-        status_data = _proj_post("/project/status", {"project": proj})
+        status_data = pc.status(proj)
         result = {"status": status_data}
         if query:
-            inject_payload = {"query": query, "top_k": 4, "active_project": proj}
-            inject_data = _proj_post("/project/inject", inject_payload)
-            frames = inject_data.get("frames", inject_data) if isinstance(inject_data, dict) else inject_data
+            import urllib.request as _ur
+            data = json.dumps({"query": query, "top_k": 4, "active_project": proj}).encode()
+            req = _ur.Request("http://127.0.0.1:7437/project/inject", data=data,
+                              headers={"Content-Type": "application/json"}, method="POST")
+            with _ur.urlopen(req, timeout=15) as resp:
+                frames = json.loads(resp.read()).get("frames", [])
             result["frames"] = frames
         return json.dumps(result, indent=2)
 
     # ── rename OLD NEW ───────────────────────────────────────────────────────
     m = re.match(r"^rename\s+(\S+)\s+(\S+)\s*$", t, re.IGNORECASE)
     if m:
-        data = _proj_post("/project/rename", {"old_name": m.group(1), "new_name": m.group(2)})
-        return json.dumps(data, indent=2)
+        import urllib.request as _ur
+        data = json.dumps({"old_name": m.group(1), "new_name": m.group(2)}).encode()
+        req = _ur.Request("http://127.0.0.1:7437/project/rename", data=data,
+                          headers={"Content-Type": "application/json"}, method="POST")
+        with _ur.urlopen(req, timeout=10) as resp:
+            return json.dumps(json.loads(resp.read()), indent=2)
 
     # ── create NAME ──────────────────────────────────────────────────────────
-    # Projects auto-create on first add; this is an explicit alias.
     m = re.match(r"^create\s+(\S+)\s*$", t, re.IGNORECASE)
     if m:
-        # Add a root node which implicitly creates the project
-        payload = {
-            "project": m.group(1),
-            "body": f"Project root for {m.group(1)}",
-            "kind": "objective", "state": "proposed",
-            "parent_id": None, "title": m.group(1),
-            "tags": [], "triggers": [], "scan_conflicts": False,
-        }
-        data = _proj_post("/project/add_node", payload)
-        return json.dumps(data, indent=2)
+        return json.dumps(pc.add_node(
+            m.group(1), f"Project root for {m.group(1)}",
+            kind="objective", state="proposed", title=m.group(1),
+        ), indent=2)
 
     return (
         "handler_proj: unrecognized form. DSL:\n"
@@ -994,7 +981,6 @@ def handler_proj(task: str) -> str:
         "  project conflicts [NAME]\n"
         "  project add NAME BODY [kind=K] [state=S] [parent=NID] [title=T]"
     )
-
 
 # ── handler_session ───────────────────────────────────────────────────────────
 # Forms:

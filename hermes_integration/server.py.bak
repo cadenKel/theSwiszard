@@ -174,34 +174,19 @@ def swiszard_agent_do(spec: str, timeout: int = 300) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-def pm_add(project: str, body: str, kind: str = "task", state: str = "active", parent_id: int = 0, title: str = "", why: str = "") -> str:
-    """Add a node. kind=task|objective|decision|question|artifact|note|lesson|north_star. state=active|proposed|done. why=reason for audit log."""
+def pm_add(project: str, body: str, kind: str = "task", state: str = "active", parent_id: int = 0, title: str = "") -> str:
+    """Add a node. kind=task|objective|decision|question|artifact|note. state=active|proposed|done."""
     pc = _get_pm_client()
     d = pc.add_node(project, body, kind=kind, state=state,
                     parent_id=parent_id or None, title=title or None)
-    node_id = d["node_id"]
-    if why:
-        try:
-            pc.log_tool_call(node_id, why, "pm_add",
-                             {"project": project, "kind": kind, "state": state, "parent_id": parent_id},
-                             f"node {node_id} created", success=True)
-        except Exception:
-            pass
-    return f"added node #{node_id} to {project}"
+    return f"added node #{d['node_id']} to {project}"
 
 
 @mcp.tool()
-def pm_transition(node_id: int, state: str, why: str = "") -> str:
-    """Change a project node state. States: active, done, proposed, blocked, abandoned, satisfied, archived. why=reason for audit log."""
+def pm_transition(node_id: int, state: str) -> str:
+    """Change a project node state. States: active, done, proposed, blocked, abandoned, satisfied, archived."""
     pc = _get_pm_client()
     d = pc.transition(node_id, state)
-    if why:
-        try:
-            pc.log_tool_call(node_id, why, "pm_transition",
-                             {"state": state},
-                             f"node {node_id}: {d.get('old_state','?')} -> {state}", success=True)
-        except Exception:
-            pass
     return f"node {node_id}: {d.get('old_state','?')} -> {d.get('new_state',state)}"
 
 
@@ -396,8 +381,8 @@ def pm_safe_transition(node_id: int, state: str) -> str:
 
 
 @mcp.tool()
-def pm_complete(node_id: int, file_path: str, func_name: str, why: str = "") -> str:
-    """Atomic task close-out: ast pin claim + verify + transition to done. Fails loud at any step. why=reason for audit log."""
+def pm_complete(node_id: int, file_path: str, func_name: str) -> str:
+    """Atomic task close-out: ast pin claim + verify + transition to done. Fails loud at any step."""
     from swiszard.router import swiszard_do as _do
     claim_result = _do(f"ast pin claim {node_id} file:{file_path} type:Function name:{func_name}", dry_run=False)
     try:
@@ -420,43 +405,12 @@ def pm_complete(node_id: int, file_path: str, func_name: str, why: str = "") -> 
         if ev.get("lineno"):
             lineno = f":{ev['lineno']}"
             break
-    if why:
-        try:
-            pc = _get_pm_client()
-            pc.log_tool_call(node_id, why, "pm_complete",
-                             {"file_path": file_path, "func_name": func_name},
-                             f"node {node_id} done at {file_path}{lineno}", success=True)
-        except Exception:
-            pass
-    # Prompt model to review failures and create lesson nodes
-    try:
-        pc = _get_pm_client()
-        failed = pc.get_failed_tool_calls(node_id)
-        if failed:
-            lesson_prompt = (
-                f"Task {node_id} is complete. Review the {len(failed)} failed tool call(s) recorded for this task. "
-                f"For each failure, create a lesson node (kind=lesson, parent_id={node_id}) with:\n"
-                f"- body: what went wrong and how to avoid it next time\n"
-                f"- trigger_text: a short phrase that would match when this lesson is relevant\n"
-                f"Only create lessons for real failures, not expected retries. "
-                f"Failed calls: " + "; ".join(
-                    f"[{c['tool_name']}] why={c['why']} result={c['result_summary'][:100]}"
-                    for c in failed[:5]
-                )
-            )
-            # Return the prompt as part of the result so the model sees it
-            return (
-                f"node {node_id} done. pin verified at {file_path}{lineno}\n\n"
-                f"LESSON_REVIEW_PROMPT: {lesson_prompt}"
-            )
-    except Exception:
-        pass
     return f"node {node_id} done. pin verified at {file_path}{lineno}"
 
 
 @mcp.tool()
 def pm_kill(node_id: int, reason: str = "") -> str:
-    """Force-terminate any PM node via SQL regardless of state machine. For noise nodes and dead weight. reason=why for audit log."""
+    """Force-terminate any PM node via SQL regardless of state machine. For noise nodes and dead weight."""
     c = _db_connect()
     row = c.execute("SELECT id, kind, state, title FROM pm_node WHERE id=?", (node_id,)).fetchone()
     if not row:
@@ -469,14 +423,6 @@ def pm_kill(node_id: int, reason: str = "") -> str:
         target = "abandoned"
     c.execute("UPDATE pm_node SET state=?, updated=? WHERE id=?", (target, int(time.time()), node_id))
     c.commit()
-    if reason:
-        try:
-            pc = _get_pm_client()
-            pc.log_tool_call(node_id, reason, "pm_kill",
-                             {"target": target},
-                             f"killed node {node_id} ({row['kind']}:{row['state']} -> {target})", success=True)
-        except Exception:
-            pass
     suffix = f" | reason: {reason}" if reason else ""
     return f"killed node {node_id} ({row['kind']}:{row['state']} -> {target}): {(row['title'] or '')[:60]}{suffix}"
 
@@ -517,10 +463,8 @@ def swiszard_patch_and_verify(
     new_str: str,
     smoke_import: str = "",
     smoke_call: str = "",
-    node_id: int = 0,
-    why: str = "",
 ) -> str:
-    """Patch file + syntax check + optional venv smoke test in one call. old_str must match exactly once. node_id+why for PM audit log."""
+    """Patch file + syntax check + optional venv smoke test in one call. old_str must match exactly once."""
     import ast as _ast
     from pathlib import Path as _P
     p = _P(file_path)
@@ -545,14 +489,6 @@ def swiszard_patch_and_verify(
         )
         r = subprocess.run([venv, "-c", snippet], capture_output=True, text=True, timeout=20)
         out += (" smoke OK: " + r.stdout.strip()[:200]) if r.returncode == 0 else (" smoke FAIL: " + r.stderr.strip()[-200:])
-    if node_id and why:
-        try:
-            pc = _get_pm_client()
-            pc.log_tool_call(node_id, why, "swiszard_patch_and_verify",
-                             {"file_path": file_path, "old_str": old_str[:80], "new_str": new_str[:80]},
-                             out, success=True)
-        except Exception:
-            pass
     return out
 
 
